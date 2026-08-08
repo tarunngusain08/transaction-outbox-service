@@ -72,6 +72,13 @@ class TransactionNormalizerTest {
     }
 
     @Test
+    void rejectsUnsupportedCurrency() {
+        assertThatThrownBy(() -> normalizer.toMinorUnits("10.00", "XYZ"))
+                .isInstanceOf(NormalizationException.class)
+                .hasMessage("Unsupported ccy: XYZ");
+    }
+
+    @Test
     void rejectsInvalidCalendarDate() {
         var request = new LegacyTransactionRequest(
                 "TXN-3",

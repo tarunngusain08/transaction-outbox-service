@@ -10,6 +10,7 @@ import org.hibernate.annotations.JdbcTypeCode;
 import org.hibernate.type.SqlTypes;
 
 import java.time.Instant;
+import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.UUID;
@@ -125,6 +126,6 @@ public class PaymentTransaction {
     }
 
     public Map<String, Object> getMetadata() {
-        return Map.copyOf(metadata);
+        return Collections.unmodifiableMap(new LinkedHashMap<>(metadata));
     }
 }

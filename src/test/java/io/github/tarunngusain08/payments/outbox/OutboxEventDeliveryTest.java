@@ -85,6 +85,20 @@ class OutboxEventDeliveryTest {
     }
 
     @Test
+    void schedulesRetryWhenProducerFailsBeforeReturningFuture() {
+        var event = pendingEvent();
+        when(outboxRepository.findByIdForUpdate(event.getId())).thenReturn(Optional.of(event));
+        when(kafkaTemplate.send(TOPIC, event.getAggregateId().toString(), event.getPayload()))
+                .thenThrow(new KafkaException("producer unavailable"));
+
+        var result = delivery.deliver(event.getId());
+
+        assertThat(result).isEqualTo(OutboxDeliveryResult.RETRY_SCHEDULED);
+        assertThat(event.getRetryCount()).isEqualTo(1);
+        assertThat(event.getLastError()).isEqualTo("producer unavailable");
+    }
+
+    @Test
     void skipsAlreadyPublishedEvent() {
         var event = pendingEvent();
         event.markPublished(NOW);
