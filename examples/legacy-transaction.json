@@ -1,0 +1,17 @@
+{
+  "txn_ref": "TXN-88214-XYZ",
+  "txn_amount": "1500.00",
+  "ccy": "INR",
+  "txn_type": "DR",
+  "payer": {
+    "acct_no": "1234567890",
+    "ifsc": "HDFC0001234"
+  },
+  "payee": {
+    "acct_no": "9876543210",
+    "ifsc": "ICIC0005678"
+  },
+  "mode": "UPI",
+  "txn_date": "08-08-2026 14:32:11",
+  "remarks": "Grocery payment"
+}
