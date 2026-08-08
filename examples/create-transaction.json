@@ -1,0 +1,12 @@
+{
+  "externalReference": "TXN-88213-ABC",
+  "amount": 150000,
+  "currency": "INR",
+  "type": "DEBIT",
+  "sourceAccount": "1234567890",
+  "destinationAccount": "9876543210",
+  "channel": "UPI",
+  "metadata": {
+    "orderId": "ORDER-99"
+  }
+}

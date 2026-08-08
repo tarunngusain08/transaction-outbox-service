@@ -63,6 +63,8 @@ public class OutboxEventDelivery {
             return recordFailure(event, exception);
         } catch (ExecutionException | TimeoutException exception) {
             return recordFailure(event, exception);
+        } catch (RuntimeException exception) {
+            return recordFailure(event, exception);
         }
     }
 

@@ -48,8 +48,14 @@ public class TransactionNormalizer {
     }
 
     long toMinorUnits(String rawAmount, String currencyCode) {
+        final Currency currency;
         try {
-            var currency = Currency.getInstance(currencyCode);
+            currency = Currency.getInstance(currencyCode);
+        } catch (IllegalArgumentException exception) {
+            throw new NormalizationException("Unsupported ccy: " + currencyCode, exception);
+        }
+
+        try {
             int fractionDigits = currency.getDefaultFractionDigits();
             if (fractionDigits < 0) {
                 throw new NormalizationException("Currency does not define minor units: " + currencyCode);
@@ -64,7 +70,7 @@ public class TransactionNormalizer {
                     .setScale(fractionDigits, RoundingMode.UNNECESSARY)
                     .movePointRight(fractionDigits)
                     .longValueExact();
-        } catch (IllegalArgumentException | ArithmeticException exception) {
+        } catch (NumberFormatException | ArithmeticException exception) {
             throw new NormalizationException(
                     "txn_amount must be a valid %s amount with no fractional minor units".formatted(currencyCode),
                     exception
