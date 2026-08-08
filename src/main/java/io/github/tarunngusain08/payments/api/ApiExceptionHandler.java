@@ -1,5 +1,6 @@
 package io.github.tarunngusain08.payments.api;
 
+import io.github.tarunngusain08.payments.normalization.NormalizationException;
 import io.github.tarunngusain08.payments.transaction.DuplicateTransactionException;
 import io.github.tarunngusain08.payments.transaction.TransactionNotFoundException;
 import org.springframework.dao.DataIntegrityViolationException;
@@ -26,6 +27,15 @@ public class ApiExceptionHandler {
     @ExceptionHandler(TransactionNotFoundException.class)
     ProblemDetail handleNotFound(TransactionNotFoundException exception) {
         return problem(HttpStatus.NOT_FOUND, "Transaction not found", exception.getMessage());
+    }
+
+    @ExceptionHandler(NormalizationException.class)
+    ProblemDetail handleNormalization(NormalizationException exception) {
+        return problem(
+                HttpStatus.UNPROCESSABLE_CONTENT,
+                "Transaction could not be normalized",
+                exception.getMessage()
+        );
     }
 
     @ExceptionHandler(MethodArgumentNotValidException.class)
