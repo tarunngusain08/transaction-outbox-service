@@ -1,5 +1,7 @@
 package io.github.tarunngusain08.payments.transaction.api;
 
+import io.github.tarunngusain08.payments.normalization.TransactionNormalizer;
+import io.github.tarunngusain08.payments.normalization.api.LegacyTransactionRequest;
 import io.github.tarunngusain08.payments.transaction.TransactionService;
 import jakarta.validation.Valid;
 import org.springframework.http.ResponseEntity;
@@ -18,9 +20,14 @@ import java.util.UUID;
 public class TransactionController {
 
     private final TransactionService transactionService;
+    private final TransactionNormalizer transactionNormalizer;
 
-    public TransactionController(TransactionService transactionService) {
+    public TransactionController(
+            TransactionService transactionService,
+            TransactionNormalizer transactionNormalizer
+    ) {
         this.transactionService = transactionService;
+        this.transactionNormalizer = transactionNormalizer;
     }
 
     @PostMapping
@@ -36,5 +43,12 @@ public class TransactionController {
     @GetMapping("/{transactionId}")
     public TransactionResponse findById(@PathVariable UUID transactionId) {
         return transactionService.findById(transactionId);
+    }
+
+    @PostMapping("/normalize")
+    public TransactionResponse normalize(
+            @Valid @RequestBody LegacyTransactionRequest request
+    ) {
+        return transactionNormalizer.normalize(request);
     }
 }
