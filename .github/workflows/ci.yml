@@ -6,11 +6,52 @@ on:
   pull_request:
     branches: [main]
 
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 permissions:
   contents: read
 
 jobs:
-  test:
+  lint:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v5
+
+      - name: Set up Java 21
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "21"
+          cache: maven
+
+      - name: Validate Compose configuration
+        run: docker compose config --quiet
+
+      - name: Lint Java and Python sources
+        run: make lint
+
+  unit-tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v5
+
+      - name: Set up Java 21
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "21"
+          cache: maven
+
+      - name: Run unit tests
+        run: make unit-test
+
+  integration-tests:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -24,5 +65,73 @@ jobs:
           java-version: "21"
           cache: maven
 
-      - name: Build and test
-        run: ./mvnw --batch-mode clean verify
+      - name: Run PostgreSQL and Kafka integration tests
+        run: make integration-test
+
+  coverage:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v5
+
+      - name: Set up Java 21
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "21"
+          cache: maven
+
+      - name: Enforce test coverage
+        run: make coverage
+
+      - name: Upload coverage and test reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-and-test-reports
+          path: |
+            target/site/jacoco
+            target/surefire-reports
+            target/failsafe-reports
+          if-no-files-found: warn
+
+  build:
+    needs: [lint, unit-tests, integration-tests]
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v5
+
+      - name: Set up Java 21
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "21"
+          cache: maven
+
+      - name: Build executable JAR and container image
+        run: make build
+
+  end-to-end-and-load:
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v5
+
+      - name: Run mixed pipeline traffic
+        run: make traffic
+
+      - name: Run bounded concurrent load scenario
+        run: make load-test LOAD_REQUESTS=40 LOAD_CONCURRENCY=8
+
+      - name: Show application logs after failure
+        if: failure()
+        run: docker compose logs app
+
+      - name: Stop local stack
+        if: always()
+        run: make stop
