@@ -4,5 +4,6 @@ public enum OutboxDeliveryResult {
     PUBLISHED,
     RETRY_SCHEDULED,
     PERMANENTLY_FAILED,
+    INTERRUPTED,
     SKIPPED
 }

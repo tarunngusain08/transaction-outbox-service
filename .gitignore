@@ -29,3 +29,6 @@ target/
 ### Python ###
 __pycache__/
 *.py[cod]
+
+### Node.js documentation tooling ###
+node_modules/

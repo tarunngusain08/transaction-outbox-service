@@ -23,6 +23,7 @@
         <jacoco.version>0.8.15</jacoco.version>
         <maven-checkstyle-plugin.version>3.6.0</maven-checkstyle-plugin.version>
         <maven-enforcer-plugin.version>3.6.3</maven-enforcer-plugin.version>
+        <minimum.branch.coverage>0.65</minimum.branch.coverage>
         <minimum.line.coverage>0.70</minimum.line.coverage>
         <skipIntegrationTests>false</skipIntegrationTests>
         <skipUnitTests>false</skipUnitTests>
@@ -206,6 +207,11 @@
                                             <counter>LINE</counter>
                                             <value>COVEREDRATIO</value>
                                             <minimum>${minimum.line.coverage}</minimum>
+                                        </limit>
+                                        <limit>
+                                            <counter>BRANCH</counter>
+                                            <value>COVEREDRATIO</value>
+                                            <minimum>${minimum.branch.coverage}</minimum>
                                         </limit>
                                     </limits>
                                 </rule>

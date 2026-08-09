@@ -25,17 +25,19 @@ sequenceDiagram
     Client->>MVC: POST /api/v1/transactions
     MVC->>Controller: Valid CreateTransactionRequest
     Controller->>Service: create(request)
-    Service->>TxRepo: existsByExternalReference(reference)
-    TxRepo->>DB: SELECT existence
-    DB-->>TxRepo: false
+    Note over Service,DB: Spring opens the transaction before create method logic executes
+    Service->>Service: Trim reference and apply source defaults
+    Service->>TxRepo: findByExternalReference(canonical reference)
+    TxRepo->>DB: SELECT transaction
+    DB-->>TxRepo: empty
     Service->>Service: Apply UUID, PENDING status, and UTC-time defaults
-    Note over Service,DB: One Spring database transaction starts
-    Service->>TxRepo: save(transaction)
-    TxRepo->>DB: INSERT transactions
-    Service->>Service: Serialize TRANSACTION_CREATED with a new eventId
+    Service->>TxRepo: persist(transaction) and flush
+    TxRepo->>DB: Execute insert-only INSERT transactions
+    Service->>Service: Serialize version-1 TRANSACTION_CREATED with a new eventId
     Service->>OutboxRepo: save(PENDING event)
-    OutboxRepo->>DB: INSERT outbox_events
-    DB-->>Service: Commit both inserts atomically
+    OutboxRepo-->>Service: Managed event (SQL may be deferred)
+    Service->>DB: Flush pending outbox INSERT and commit
+    DB-->>Service: Both durable rows committed atomically
     Service-->>Controller: Canonical TransactionResponse
     Controller-->>Client: 201 Created + Location header
     Note over Client,DB: No Kafka call occurs on the request thread
@@ -61,17 +63,30 @@ sequenceDiagram
     else Request shape is valid
         MVC->>Controller: CreateTransactionRequest
         Controller->>Service: create(request)
-        Service->>DB: Check external_reference
+        Note over Service,DB: Transaction starts before service method logic
+        Service->>DB: Read by trimmed external_reference
         alt Reference already exists
-            DB-->>Service: true
-            Service->>Handler: DuplicateTransactionException
-            Handler-->>Client: 409 ProblemDetail
-        else Concurrent request wins unique constraint
-            Service->>DB: Attempt transaction + outbox inserts
-            DB-->>Service: DataIntegrityViolationException
-            Note over Service,DB: Spring rolls back the whole database transaction
-            Service->>Handler: DataIntegrityViolationException
-            Handler-->>Client: 409 ProblemDetail
+            DB-->>Service: Stored transaction
+            alt Canonical request matches stored fields
+                Service-->>Controller: Original transaction, replayed=true
+                Controller-->>Client: 200 OK + original Location
+            else Same reference has different fields
+                Service->>Handler: DuplicateTransactionException
+                Handler-->>Client: 409 ProblemDetail
+            end
+        else New reference
+            Service->>DB: Insert-only transaction flush and stage outbox
+            alt Known primary/external unique constraint loses a race
+                DB-->>Service: DataIntegrityViolationException
+                Note over Service,DB: Spring rolls back the whole database transaction
+                Service->>Handler: Known unique constraint
+                Handler-->>Client: 409 ProblemDetail
+            else Unrelated integrity constraint fails
+                DB-->>Service: DataIntegrityViolationException
+                Note over Service,DB: Spring rolls back the whole database transaction
+                Service->>Handler: Unexpected integrity failure
+                Handler-->>Client: Sanitized 500 ProblemDetail
+            end
         end
     end
 ```
@@ -123,7 +138,7 @@ sequenceDiagram
     participant Handler as ApiExceptionHandler
 
     Client->>MVC: POST /api/v1/transactions/normalize
-    alt Required legacy field/IFSC shape is invalid
+    alt Required field/IFSC shape or currency is invalid/unsupported
         MVC->>Handler: MethodArgumentNotValidException
         Handler-->>Client: 400 ProblemDetail + field errors
     else Request shape is valid
@@ -133,7 +148,7 @@ sequenceDiagram
         Normalizer->>Normalizer: Map DR/CR and payment channel
         Normalizer->>Normalizer: Convert Asia/Kolkata source time to Instant
         Normalizer->>Normalizer: Flatten accounts and preserve source metadata
-        alt Currency, amount, type, or date is semantically invalid
+        alt Amount, type, or date is semantically invalid
             Normalizer->>Handler: NormalizationException
             Handler-->>Client: 422 ProblemDetail
         else Normalization succeeds
@@ -152,47 +167,62 @@ sequenceDiagram
     autonumber
     participant Scheduler as OutboxPoller
     participant Publisher as OutboxPublisher
+    participant Claim as OutboxEventClaimService
     participant Delivery as OutboxEventDelivery
+    participant Finalizer as OutboxEventFinalizer
     participant DB as PostgreSQL
     participant Kafka as Kafka broker
     participant Consumer as External consumer
 
     Scheduler->>Publisher: publishPendingBatch() on fixed delay
-    Publisher->>DB: SELECT due PENDING IDs ordered by created_at LIMIT batchSize
-    DB-->>Publisher: Candidate event IDs
-    loop Each candidate ID
-        Publisher->>Delivery: deliver(eventId)
-        Note over Delivery,DB: Start independent REQUIRES_NEW transaction
-        Delivery->>DB: SELECT event FOR UPDATE
-        alt Missing, not PENDING, or not yet due
-            Delivery->>DB: Commit without state change
-            Delivery-->>Publisher: SKIPPED
-        else Eligible PENDING event
-            Delivery->>Kafka: Send key=transactionId and value=stored JSON, then await acknowledgement
-            alt Broker acknowledges before timeout
-                Kafka-->>Delivery: Send result
-                Delivery->>DB: Set PUBLISHED and published_at, then clear last_error
-                Delivery->>DB: Commit
-                Kafka-->>Consumer: TRANSACTION_CREATED (at least once)
-                Consumer->>Consumer: Deduplicate by eventId
-                Delivery-->>Publisher: PUBLISHED
-            else Send fails, times out, or is interrupted
-                Delivery->>DB: Increment retry_count and store bounded root error
-                alt retry_count is below maxRetries
-                    Delivery->>DB: Keep PENDING and schedule next_attempt_at with exponential backoff
-                    Delivery->>DB: Commit
-                    Delivery-->>Publisher: RETRY_SCHEDULED
-                else retry_count reaches maxRetries
-                    Delivery->>DB: Set FAILED and commit
-                    Delivery-->>Publisher: PERMANENTLY_FAILED
-                end
+    Publisher->>Claim: claimBatch()
+    Note over Claim,DB: Short REQUIRES_NEW claim transaction
+    Claim->>DB: SELECT due PENDING or expired PROCESSING rows FOR UPDATE SKIP LOCKED
+    DB-->>Claim: Disjoint bounded event IDs
+    Claim->>DB: Set PROCESSING, claim_token, claimed_at
+    Claim->>DB: Commit and release every row lock
+    Claim-->>Publisher: Immutable claimed event snapshots
+    loop Each claimed event
+        Publisher->>Delivery: deliver(claimed event)
+        Note over Delivery,Kafka: No database transaction or row lock is open
+        Delivery->>Kafka: Send key=transactionId and stored versioned JSON, then await acknowledgement
+        Kafka-->>Consumer: Record may be observable before DB finalize commit
+        Consumer->>Consumer: Validate schemaVersion and deduplicate by eventId
+        alt Broker acknowledges before timeout
+            Kafka-->>Delivery: Send result
+            Delivery->>Finalizer: markPublished(eventId, claimToken)
+            Note over Finalizer,DB: Short REQUIRES_NEW finalize transaction
+            Finalizer->>DB: Lock row and require current PROCESSING claim token
+            alt Claim token is still current
+                Finalizer->>DB: Set PUBLISHED and published_at, clear claim/error, then commit
+                Finalizer-->>Delivery: PUBLISHED
+            else Lease was reclaimed or row changed
+                Finalizer->>DB: Commit without mutation
+                Finalizer-->>Delivery: SKIPPED
+            end
+        else Send fails, times out, or is interrupted
+            Delivery->>Finalizer: recordFailure(eventId, claimToken, bounded error)
+            Finalizer->>DB: Lock row and require current PROCESSING claim token
+            alt Current claim and retry_count below maxRetries
+                Finalizer->>DB: Set PENDING and next_attempt_at, clear claim, then commit
+                Finalizer-->>Delivery: RETRY_SCHEDULED
+            else Current claim reaches maxRetries
+                Finalizer->>DB: Set FAILED, clear claim, then commit
+                Finalizer-->>Delivery: PERMANENTLY_FAILED
+            else Claim token is stale
+                Finalizer->>DB: Commit without mutation
+                Finalizer-->>Delivery: SKIPPED
+            end
+            opt Thread was interrupted
+                Delivery-->>Publisher: INTERRUPTED and preserve interrupt flag
+                Publisher->>Publisher: Stop batch before any later send
             end
         end
     end
-    Note over Delivery,Kafka: Broker acknowledgement followed by DB commit failure can cause a later duplicate publish
+    Note over Delivery,Kafka: Acknowledgement plus finalize failure or lease expiry can produce a duplicate publish
 ```
 
-### UC-04 — Serialize concurrent delivery of the same event
+### UC-04 — Claim disjoint work across concurrent pollers
 
 ```mermaid
 sequenceDiagram
@@ -202,21 +232,29 @@ sequenceDiagram
     participant DB as PostgreSQL
     participant Kafka as Kafka broker
 
-    WorkerA->>DB: Discover the same due event ID
-    WorkerB->>DB: Discover the same due event ID
-    WorkerA->>DB: SELECT event FOR UPDATE
-    DB-->>WorkerA: Lock granted with status PENDING
-    WorkerB->>DB: SELECT event FOR UPDATE
-    Note over WorkerB,DB: Instance B waits for the row lock
-    WorkerA->>Kafka: Publish stored payload
-    Kafka-->>WorkerA: Acknowledged
-    WorkerA->>DB: Set PUBLISHED and commit, releasing the lock
-    DB-->>WorkerB: Lock granted with current status PUBLISHED
-    WorkerB->>WorkerB: Re-check status and skip
-    WorkerB->>DB: Commit without publishing
+    par Claim transaction A
+        WorkerA->>DB: SELECT bounded due rows FOR UPDATE SKIP LOCKED
+        DB-->>WorkerA: Batch A
+        WorkerA->>DB: Mark Batch A PROCESSING with claim tokens, then commit
+    and Claim transaction B
+        WorkerB->>DB: SELECT bounded due rows FOR UPDATE SKIP LOCKED
+        DB-->>WorkerB: Disjoint Batch B (locked rows skipped)
+        WorkerB->>DB: Mark Batch B PROCESSING with claim tokens, then commit
+    end
+    Note over WorkerA,WorkerB: Database locks are released before broker I/O
+    par Publish Batch A outside a DB transaction
+        WorkerA->>Kafka: Publish claimed payloads
+        Kafka-->>WorkerA: Acknowledgements
+        WorkerA->>DB: Guarded short finalize transactions
+    and Publish Batch B outside a DB transaction
+        WorkerB->>Kafka: Publish claimed payloads
+        Kafka-->>WorkerB: Acknowledgements
+        WorkerB->>DB: Guarded short finalize transactions
+    end
+    Note over WorkerA,DB: An abandoned PROCESSING lease becomes claimable after claimLease
 ```
 
-### UC-07 — Report health and readiness
+### UC-07 — Report application and delivery status
 
 ```mermaid
 sequenceDiagram
@@ -224,20 +262,25 @@ sequenceDiagram
     actor Probe as Operator / Compose health check
     participant Actuator as Spring Boot Actuator
     participant Indicators as Registered health contributors
+    participant Outbox as OutboxDeliveryEndpoint
+    participant DB as PostgreSQL
 
-    Probe->>Actuator: GET /actuator/health
-    Actuator->>Indicators: Evaluate registered health state
-    Indicators-->>Actuator: Component statuses
-    alt Response is healthy
-        Actuator-->>Probe: 200 aggregate UP response
-        Probe->>Probe: Operator sees healthy and Compose health command exits 0
-    else Response is unhealthy or times out
-        Actuator-->>Probe: Non-healthy response or timeout
-        Probe->>Probe: Operator investigates while Compose retries or fails --wait
+    alt Basic application / Compose readiness check
+        Probe->>Actuator: GET /actuator/health
+        Actuator->>Indicators: Evaluate registered application contributors
+        Indicators-->>Actuator: Component statuses
+        Actuator-->>Probe: Aggregate health response
+        Note over Probe,Actuator: Kafka backlog does not intentionally make the ingest API unavailable
+    else Separate asynchronous-delivery inspection
+        Probe->>Actuator: GET /actuator/outbox
+        Actuator->>Outbox: snapshot()
+        Outbox->>DB: Count PENDING / PROCESSING / FAILED and find oldest unpublished
+        DB-->>Outbox: Delivery state
+        Outbox-->>Probe: Counts, age in seconds, and checkedAt
     end
 ```
 
-### UC-08 — Inspect retained outbox audit state
+### UC-08 — Inspect retained outbox operational history
 
 ```mermaid
 sequenceDiagram
@@ -248,8 +291,8 @@ sequenceDiagram
 
     Operator->>PSQL: Query outbox_events
     PSQL->>DB: SELECT id, aggregate_id, status, retry_count, last_error, published_at
-    DB-->>PSQL: Retained PENDING / PUBLISHED / FAILED rows
-    PSQL-->>Operator: Audit and diagnostic view
+    DB-->>PSQL: Retained PENDING / PROCESSING / PUBLISHED / FAILED rows
+    PSQL-->>Operator: Mutable operational and diagnostic view
     Note over Operator,DB: Current scope is read-only SQL with no operator HTTP API or replay command
 ```
 
@@ -286,7 +329,7 @@ sequenceDiagram
     Docker-->>Developer: Complete stack ready on localhost:8080
     Developer->>Make: make stop
     Make->>Docker: compose down
-    Note over Docker,Postgres: Containers and network stop while the named PostgreSQL volume is retained
+    Note over Docker,Kafka: Containers stop while named PostgreSQL and Kafka volumes are retained
 ```
 
 ### ENG-03, ENG-06 — Execute local and CI quality gates
@@ -298,6 +341,8 @@ sequenceDiagram
     participant Make as Makefile
     participant Maven as Maven Wrapper
     participant Python as Python compiler
+    participant Node as Pinned documentation tools
+    participant Chrome as Headless Chrome
     participant TC as Testcontainers
     participant Docker as Docker
     participant Reports as Test and coverage reports
@@ -306,7 +351,11 @@ sequenceDiagram
     loop Each gate selected by that workflow
         alt Lint gate
             Make->>Maven: Checkstyle Java sources
-            Make->>Python: Compile-check traffic_simulator.py
+            Make->>Python: Compile-check repository Python scripts
+            Make->>Node: npm ci from package-lock and Markdown lint
+            Node->>Python: Run local link / use-case traceability checks
+            Python->>Chrome: Render every Mermaid block through pinned CLI
+            Chrome-->>Python: Parsed SVG artefacts in a temporary directory
         else Unit-only gate
             Make->>Maven: Run Surefire while excluding *IT
             Maven->>Reports: Write unit reports
@@ -317,7 +366,7 @@ sequenceDiagram
             Docker-->>TC: Healthy dependencies
             TC-->>Maven: Integration scenarios complete
             Maven->>Reports: Write Surefire/Failsafe reports and JaCoCo report when enabled
-            Maven->>Maven: Enforce 70% line threshold when coverage is enabled
+            Maven->>Maven: Enforce 70% line and 65% branch thresholds when coverage is enabled
         else Build gate
             Make->>Maven: Package executable JAR with unit execution skipped
             Make->>Docker: Build application image
@@ -354,9 +403,11 @@ sequenceDiagram
     Poller->>Kafka: Publish successful create events asynchronously
     Simulator->>DB: Poll exact prefix counts and PUBLISHED outbox counts
     DB-->>Simulator: Expected records and events settled
-    Simulator->>Kafka: Consume topic from beginning and filter unique prefix
-    Kafka-->>Simulator: Matching TRANSACTION_CREATED events
-    Simulator->>Simulator: Assert statuses and end-to-end counts, then calculate throughput and percentiles
+    Simulator->>Kafka: Consume keys and values from beginning, then filter unique prefix
+    Kafka-->>Simulator: Matching versioned TRANSACTION_CREATED occurrences
+    Simulator->>Simulator: Validate key, envelope, event ID, and exact canonical body
+    Simulator->>Simulator: Permit same-event repeats and reject contradictory creation IDs
+    Simulator->>Simulator: Enforce expected statuses and configurable load bounds
     Simulator-->>Initiator: Exit 0 on complete match and non-zero on any mismatch
 ```
 
@@ -508,26 +559,4 @@ sequenceDiagram
         CI->>Deploy: Allow versioned producer deployment
         Deploy-->>Developer: Gate passed
     end
-```
-
-### UC-P08 — Planned scalable outbox claiming
-
-```mermaid
-sequenceDiagram
-    autonumber
-    participant WorkerA as Delivery worker A
-    participant WorkerB as Delivery worker B
-    participant DB as PostgreSQL
-    participant Kafka as Kafka
-
-    WorkerA->>DB: Atomically claim bounded due batch using SKIP LOCKED or claim token
-    DB-->>WorkerA: Batch A
-    WorkerB->>DB: Atomically claim bounded due batch using same protocol
-    DB-->>WorkerB: Disjoint Batch B
-    Note over WorkerA,WorkerB: No event is actively owned by both workers
-    WorkerA->>Kafka: Publish Batch A with existing acknowledgement/retry semantics
-    WorkerB->>Kafka: Publish Batch B with existing acknowledgement/retry semantics
-    WorkerA->>DB: Commit PUBLISHED/retry states for Batch A
-    WorkerB->>DB: Commit PUBLISHED/retry states for Batch B
-    Note over DB,Kafka: At-least-once delivery and eventId deduplication remain unchanged
 ```

@@ -13,40 +13,50 @@
 canonical transaction and its `TRANSACTION_CREATED` outbox event through JPA in
 one PostgreSQL transaction. No Kafka call occurs on the request thread.
 
-This avoids the classic dual-write failure where a transaction commits but its
-event is lost. A serialization or database failure rolls back both inserts.
+This avoids the classic dual-write failure where a transaction commits but no
+durable event record accompanies it. A serialization or database failure rolls
+back the transaction insert as well as any staged outbox insert. Kafka delivery
+is deliberately asynchronous and is not part of this atomic boundary.
 
 ## Delivery semantics
 
-The scheduled poller selects eligible `PENDING` event IDs in small batches. Each
-event is then processed in its own `REQUIRES_NEW` transaction:
+The scheduled poller processes small batches in three phases:
 
-1. Lock the row and re-check that it is still eligible.
-2. Publish the stored JSON payload using the transaction ID as the Kafka key.
-3. Wait for the broker acknowledgement.
-4. Mark the row `PUBLISHED` and retain it for audit.
+1. A short `REQUIRES_NEW` claim transaction selects due `PENDING` rows or
+   expired `PROCESSING` leases with `FOR UPDATE SKIP LOCKED`, assigns each a
+   unique claim token, changes status to `PROCESSING`, and commits.
+2. With no database transaction or row lock open, the worker publishes the
+   stored JSON using the transaction ID as Kafka key and waits for acknowledgement.
+   Kafka producer `max.block.ms` and the future wait both have explicit bounds.
+3. A short `REQUIRES_NEW` finalize transaction locks the one row, verifies the
+   claim token is still current, and records `PUBLISHED`, a scheduled retry, or
+   terminal `FAILED`.
 
 If Kafka accepts the record but the database update subsequently fails, the
-event is retried. Delivery is therefore **at least once**. Consumers must use
-`eventId` as an idempotency key.
+lease eventually expires and the event is retried. A consumer can also observe
+the Kafka record before the `PUBLISHED` database commit completes. Delivery is
+therefore **at least once**; consumers must use `eventId` as an idempotency key.
 
 Failures use exponential backoff (1, 2, 4, ... seconds, capped at five minutes).
-After the configured maximum, the row becomes `FAILED` and remains queryable for
-operator review.
+With the default eight-attempt budget, scheduled waits reach 64 seconds before
+the eighth failure becomes terminal. Larger retry budgets reach the five-minute
+formula cap. A `FAILED` row remains queryable for operator review.
 
 ## Concurrency
 
-`PESSIMISTIC_WRITE` serializes delivery of a selected event. A second service
-instance may discover the same candidate ID, but after it obtains the lock it
-re-checks the status and skips an event already published by another instance.
-This design favors clarity for the exercise. At high volume, use claim tokens or
-`FOR UPDATE SKIP LOCKED` batch claiming to reduce lock duration.
+`FOR UPDATE SKIP LOCKED` gives concurrent pollers disjoint claim batches without
+waiting on another poller's selected rows. A claim lease recovers work after a
+process exits between claim and finalize. Guarded claim-token checks stop a stale
+worker from finalizing a lease now owned by another worker. A lease expiring
+during a very slow but successful publish can still produce a duplicate, which
+is why `eventId` deduplication remains mandatory.
 
 ## Normalization boundary
 
-The normalization endpoint is deliberately pure: it neither writes to the
-database nor emits an event. Its output is the same canonical shape accepted by
-the create endpoint. It:
+The normalization endpoint is side-effect-free: it neither writes to the
+database nor emits an event. It is not deterministic because each response gets
+a new UUID. Its output is the same canonical shape accepted by the create
+endpoint. It:
 
 - converts a decimal major-unit string to exact ISO-currency minor units;
 - maps `DR`/`CR` into canonical enums;
@@ -64,8 +74,15 @@ and Kafka consumption together.
 The repository-level traffic simulator covers the packaged Compose topology. It
 sends expected successes and failures under sequential or concurrent load, then
 correlates its unique run prefix across `transactions`, published
-`outbox_events`, and consumed Kafka messages. This verifies the complete data
-path without treating expected 4xx responses as test failures.
+`outbox_events`, and consumed Kafka messages. It checks the Kafka key, envelope,
+single creation identity, and complete canonical body while allowing repeats of
+that same event identity. Configurable local throughput and p95 bounds make load
+mode a bounded acceptance scenario, not a capacity claim.
+
+`GET /actuator/outbox` reports pending, processing, and failed counts plus oldest
+unpublished age without changing ordinary `/actuator/health`. It enables a
+separate delivery alarm signal, but this repository does not configure an alert
+backend.
 
 ## Production follow-ups
 
@@ -82,4 +99,3 @@ implemented yet.
 - UC-P06: export correlated telemetry and provide production SLO dashboards and
   alerts.
 - UC-P07: enforce schema-registry compatibility before event changes deploy.
-- UC-P08: claim disjoint outbox batches efficiently across high-volume workers.

@@ -26,11 +26,11 @@ flowchart LR
         uc01(["UC-01 Create canonical transaction"])
         uc02(["UC-02 Retrieve transaction by ID"])
         uc03(["UC-03 Normalize legacy transaction"])
-        uc04(["UC-04 Publish pending outbox event"])
+        uc04(["UC-04 Claim and publish a due outbox event"])
         uc05(["UC-05 Retry or terminally fail delivery"])
         uc06(["UC-06 Publish transaction-created contract"])
-        uc07(["UC-07 Report service health / info"])
-        uc08(["UC-08 Inspect retained outbox audit state"])
+        uc07(["UC-07 Report application and outbox status"])
+        uc08(["UC-08 Inspect retained operational history"])
     end
 
     apiClient --> uc01
@@ -52,14 +52,14 @@ flowchart LR
 
 | ID | Status | Primary actor and trigger | Successful outcome | Alternate or failure outcome |
 |---|---|---|---|---|
-| UC-01 | Implemented | API client sends `POST /api/v1/transactions` | Returns `201` with a canonical transaction and `Location`; transaction and `PENDING` outbox row commit atomically | Bean validation returns `400`; duplicate external reference or identifier returns `409`; serialization/database failure rolls back both writes |
+| UC-01 | Implemented | API client sends strict `POST /api/v1/transactions` JSON | New input returns `201` and atomically commits a canonical transaction plus `PENDING` event; an identical canonical-reference replay returns the original record with `200` | Invalid/coerced/oversized input returns `400`; a conflicting reference or primary key returns `409`; serialization/database failure rolls back the create |
 | UC-02 | Implemented | API client sends `GET /api/v1/transactions/{transactionId}` | Returns `200` with the stored canonical transaction | Unknown UUID returns `404`; a malformed UUID is rejected by Spring request binding with `400` |
-| UC-03 | Implemented | API client sends `POST /api/v1/transactions/normalize` with the legacy schema | Returns `200` with a canonical, non-persisted record; amount, type, timestamp, accounts, channel, and metadata are normalized | Shape validation returns `400`; unsupported currency/type, invalid amount precision, or invalid date returns `422`; no database or Kafka side effect occurs |
-| UC-04 | Implemented | Scheduled poller finds a due `PENDING` outbox ID | Locks the row, publishes its stored payload, waits for Kafka acknowledgement, and commits status `PUBLISHED` | Missing, non-pending, or not-yet-due rows are skipped; concurrent workers serialize on the row lock |
-| UC-05 | Implemented | Kafka send throws, times out, or is interrupted | Increments `retry_count`, stores a bounded root error, and schedules exponential backoff from 1 second up to 5 minutes | Once the configured maximum is reached, status becomes `FAILED`; there is currently no automatic or operator replay path |
-| UC-06 | Implemented contract | UC-04 sends `TRANSACTION_CREATED` to `payments.transactions.created` | Kafka receives the transaction ID as key and the persisted event JSON as value | Delivery is at least once; external consumers, not this service, must deduplicate on `eventId` |
-| UC-07 | Implemented | Operator or Compose health probe calls `/actuator/health` or `/actuator/info` | Actuator reports the registered application health/info state | A non-healthy result prevents Compose `--wait` from declaring the application ready |
-| UC-08 | Implemented | Authorized operator queries PostgreSQL directly | Retained outbox rows expose status, retry count, error, and publication time for audit/diagnosis | No supported HTTP operator API, archival job, or replay command exists yet |
+| UC-03 | Implemented | API client sends `POST /api/v1/transactions/normalize` with the legacy schema | Returns `200` with a canonical, non-persisted record; amount, type, timestamp, accounts, channel, and metadata are normalized | Shape or unsupported-currency validation returns `400`; unsupported type, invalid amount precision, or invalid date returns `422`; no database or Kafka side effect occurs |
+| UC-04 | Implemented | Scheduled poller claims due `PENDING` or expired `PROCESSING` rows | A short `SKIP LOCKED` transaction commits claim tokens; Kafka I/O runs without a DB transaction; a guarded short transaction records `PUBLISHED` | Concurrent workers receive disjoint batches; abandoned leases become claimable; a stale worker cannot finalize a newer claim |
+| UC-05 | Implemented | Kafka send throws, times out, or is interrupted | A guarded finalize increments `retry_count`, stores a bounded root error, releases the claim, and schedules exponential backoff up to the formula's 5-minute cap | The configured attempt limit produces `FAILED`; interruption stops the remaining batch; no replay path exists yet |
+| UC-06 | Implemented contract | UC-04 sends `TRANSACTION_CREATED` to `payments.transactions.created` | Kafka receives transaction ID as key and a version-1 envelope with producer, event identity/time, and canonical body | Delivery is at least once; external consumers, not this service, must validate the version and deduplicate on `eventId` |
+| UC-07 | Implemented | Probe calls `/actuator/health` or operator calls `/actuator/outbox` | Basic application health remains independent; outbox status reports pending/processing/failed counts and oldest unpublished age | Compose readiness can be `UP` during broker backlog by design; alert routing and thresholds remain planned |
+| UC-08 | Implemented | Local database operator queries PostgreSQL directly | Retained mutable rows expose status, retry count, error, claim, and publication state for diagnosis | This is operational history, not tamper-evident audit storage; no operator HTTP replay or archival job exists |
 
 ## Implemented engineering use cases
 
@@ -97,11 +97,11 @@ flowchart LR
 | ID | Interface | Verified outcome |
 |---|---|---|
 | ENG-01 | `make build` | Executable Spring Boot JAR and local container image build successfully |
-| ENG-02 | `make run`, `make stop` | Application, PostgreSQL, Kafka, and topic initialization start in dependency order and stop while retaining the database volume |
-| ENG-03 | `make unit-test`, `make integration-test`, `make test`, `make lint`, `make coverage`, `make check` | Unit and Testcontainers suites, Checkstyle, Python compilation, JaCoCo threshold, and toolchain enforcement pass |
-| ENG-04 | `make traffic` | Expected `2xx`, `400`, `409`, and `422` responses occur and every successful create is correlated through PostgreSQL, `PUBLISHED` outbox state, and Kafka |
-| ENG-05 | `make load-test` | Configurable concurrent valid/invalid traffic completes with the expected status distribution and full pipeline correlation; throughput and p50/p95/p99 latency are reported |
-| ENG-06 | `.github/workflows/ci.yml` | Independent lint, unit, integration, coverage, build, and bounded end-to-end/load checks are defined for pushes and pull requests targeting `main` |
+| ENG-02 | `make run`, `make stop`, `make reset` | Stack starts in dependency order; ordinary stop retains both PostgreSQL and Kafka volumes; explicit reset deletes both |
+| ENG-03 | `make unit-test`, `make integration-test`, `make test`, `make lint`, `make docs-lint`, `make coverage`, `make check` | Tests, Checkstyle, Python compilation, pinned Markdown/Mermaid/link checks, JaCoCo threshold, and toolchain enforcement pass |
+| ENG-04 | `make traffic` | Expected `2xx`, `400`, `409`, and `422` responses occur; exact HTTP/DB/outbox/Kafka contracts correlate for every successful create |
+| ENG-05 | `make load-test` | Concurrent valid/invalid traffic satisfies configurable throughput and p95 bounds, expected statuses, and exact pipeline checks; the result is local acceptance evidence, not capacity |
+| ENG-06 | `.github/workflows/ci.yml` | SHA-pinned static/docs, test/coverage, build, and E2E/load gates run for `main` PRs and `main`/`tgusain/**` pushes; dependency review additionally gates PRs |
 
 ## Planned next-phase use cases
 
@@ -116,7 +116,6 @@ flowchart LR
     operator["Actor: Authorized operator"]
     retention["Actor: Retention scheduler"]
     platform["Actor: Platform / SRE"]
-    deliveryWorkers["Actor: Multiple delivery workers"]
     deliveryTeam["Actor: Developer / CI"]
     schemaRegistry["Actor: Schema registry"]
 
@@ -128,7 +127,6 @@ flowchart LR
         p05(["UC-P05 Archive eligible PUBLISHED events"])
         p06(["UC-P06 Export telemetry and alert on SLOs"])
         p07(["UC-P07 Enforce event-schema compatibility"])
-        p08(["UC-P08 Claim outbox work efficiently at scale"])
     end
 
     apiClient --> p01
@@ -140,10 +138,9 @@ flowchart LR
     platform --> p06
     deliveryTeam --> p07
     p07 --> schemaRegistry
-    deliveryWorkers --> p08
 
     classDef planned fill:#fff8e1,stroke:#f9a825,color:#5d4037,stroke-dasharray:5 5;
-    class p01,p02,p03,p04,p05,p06,p07,p08 planned;
+    class p01,p02,p03,p04,p05,p06,p07 planned;
 ```
 
 | ID | Status | Intended actor and trigger | Required outcome before the use case is considered complete |
@@ -155,7 +152,6 @@ flowchart LR
 | UC-P05 | Planned | Retention scheduler finds old `PUBLISHED` events past policy | Copy to approved audit storage, verify the archive, then remove/partition source rows without touching `PENDING` or `FAILED` events |
 | UC-P06 | Planned | Request/outbox activity or an SLO breach occurs | Export correlated traces and broker/database/outbox metrics; provide dashboards and actionable alerts |
 | UC-P07 | Planned | CI proposes an event-schema change | Check the chosen compatibility mode against the registry and block incompatible deployment before producers emit the change |
-| UC-P08 | Planned | Multiple instances process a high-volume backlog | Atomically claim disjoint batches, for example with claim tokens or `FOR UPDATE SKIP LOCKED`, while retaining at-least-once delivery |
 
 ## Traceability to sequence diagrams
 
@@ -167,8 +163,8 @@ Every use case above is represented in
 | UC-01 | Create and atomically stage an event; reject invalid or duplicate create |
 | UC-02 | Retrieve a transaction |
 | UC-03 | Normalize a legacy transaction |
-| UC-04, UC-05, UC-06 | Deliver, retry, or fail an outbox event; serialize concurrent delivery |
-| UC-07, UC-08 | Report health; inspect retained audit state |
+| UC-04, UC-05, UC-06 | Claim, deliver, retry, or fail an outbox event; claim disjoint concurrent work |
+| UC-07, UC-08 | Report application/delivery status; inspect retained operational history |
 | ENG-01, ENG-02 | Build and run the local stack |
 | ENG-03, ENG-06 | Execute local and CI quality gates |
 | ENG-04, ENG-05 | Verify smoke and concurrent load traffic |
@@ -177,4 +173,3 @@ Every use case above is represented in
 | UC-P05 | Planned archival workflow |
 | UC-P06 | Planned telemetry and SLO alerting |
 | UC-P07 | Planned schema-compatibility gate |
-| UC-P08 | Planned scalable outbox claiming |

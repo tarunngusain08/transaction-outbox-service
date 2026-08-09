@@ -16,14 +16,25 @@ public interface OutboxEventRepository extends JpaRepository<OutboxEvent, UUID> 
     @Query(value = """
             SELECT id
             FROM outbox_events
-            WHERE status = 'PENDING'
-              AND next_attempt_at <= :now
+            WHERE (status = 'PENDING' AND next_attempt_at <= :now)
+               OR (status = 'PROCESSING' AND claimed_at <= :expiredBefore)
             ORDER BY created_at
             LIMIT :batchSize
+            FOR UPDATE SKIP LOCKED
             """, nativeQuery = true)
-    List<UUID> findReadyEventIds(@Param("now") Instant now, @Param("batchSize") int batchSize);
+    List<UUID> findClaimableEventIds(
+            @Param("now") Instant now,
+            @Param("expiredBefore") Instant expiredBefore,
+            @Param("batchSize") int batchSize
+    );
 
     @Lock(LockModeType.PESSIMISTIC_WRITE)
     @Query("SELECT event FROM OutboxEvent event WHERE event.id = :id")
     Optional<OutboxEvent> findByIdForUpdate(@Param("id") UUID id);
+
+    long countByStatus(OutboxStatus status);
+
+    @Query("SELECT MIN(event.createdAt) FROM OutboxEvent event "
+            + "WHERE event.status IN :statuses")
+    Instant findOldestCreatedAtByStatusIn(@Param("statuses") List<OutboxStatus> statuses);
 }

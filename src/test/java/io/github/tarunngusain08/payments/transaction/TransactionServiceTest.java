@@ -10,7 +10,6 @@ import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.ArgumentCaptor;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
-import tools.jackson.databind.ObjectMapper;
 
 import java.time.Clock;
 import java.time.Instant;
@@ -22,7 +21,6 @@ import java.util.UUID;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
-import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
@@ -37,10 +35,13 @@ class TransactionServiceTest {
     private PaymentTransactionRepository transactionRepository;
 
     @Mock
+    private PaymentTransactionInserter transactionInserter;
+
+    @Mock
     private OutboxEventRepository outboxRepository;
 
     @Mock
-    private ObjectMapper objectMapper;
+    private TransactionEventSerializer eventSerializer;
 
     private TransactionService service;
 
@@ -48,28 +49,34 @@ class TransactionServiceTest {
     void setUp() {
         service = new TransactionService(
                 transactionRepository,
+                transactionInserter,
                 outboxRepository,
-                objectMapper,
+                eventSerializer,
                 Clock.fixed(NOW, ZoneOffset.UTC)
         );
     }
 
     @Test
     void savesTransactionAndPendingOutboxEvent() throws Exception {
-        when(objectMapper.writeValueAsString(any(TransactionCreatedEvent.class)))
+        when(eventSerializer.serialize(any(TransactionCreatedEvent.class)))
                 .thenReturn("{\"eventType\":\"TRANSACTION_CREATED\"}");
 
-        var response = service.create(request());
+        var result = service.create(request());
+        var response = result.transaction();
+
+        assertThat(result.created()).isTrue();
 
         var transactionCaptor = ArgumentCaptor.forClass(PaymentTransaction.class);
-        verify(transactionRepository).save(transactionCaptor.capture());
+        verify(transactionInserter).insert(transactionCaptor.capture());
         var savedTransaction = transactionCaptor.getValue();
         assertThat(savedTransaction.getId()).isEqualTo(TRANSACTION_ID);
         assertThat(savedTransaction.getStatus()).isEqualTo(TransactionStatus.PENDING);
         assertThat(savedTransaction.getCreatedAt()).isEqualTo(NOW);
 
         var eventCaptor = ArgumentCaptor.forClass(TransactionCreatedEvent.class);
-        verify(objectMapper).writeValueAsString(eventCaptor.capture());
+        verify(eventSerializer).serialize(eventCaptor.capture());
+        assertThat(eventCaptor.getValue().schemaVersion()).isEqualTo(1);
+        assertThat(eventCaptor.getValue().producer()).isEqualTo("transaction-outbox-service");
         assertThat(eventCaptor.getValue().eventType()).isEqualTo(TransactionCreatedEvent.EVENT_TYPE);
         assertThat(eventCaptor.getValue().transaction()).isEqualTo(response);
 
@@ -86,14 +93,51 @@ class TransactionServiceTest {
 
     @Test
     void rejectsDuplicateExternalReferenceBeforeWriting() {
-        when(transactionRepository.existsByExternalReference("TXN-88213-ABC")).thenReturn(true);
+        when(transactionRepository.findByExternalReference("TXN-88213-ABC"))
+                .thenReturn(Optional.of(new PaymentTransaction(
+                        TRANSACTION_ID,
+                        "TXN-88213-ABC",
+                        999L,
+                        "USD",
+                        TransactionType.CREDIT,
+                        TransactionStatus.SUCCESS,
+                        "OTHER-SOURCE",
+                        "OTHER-DESTINATION",
+                        PaymentChannel.CARD,
+                        NOW,
+                        Map.of()
+                )));
 
         assertThatThrownBy(() -> service.create(request()))
                 .isInstanceOf(DuplicateTransactionException.class)
                 .hasMessageContaining("TXN-88213-ABC");
 
-        verify(transactionRepository, never()).save(any());
-        verifyNoInteractions(outboxRepository, objectMapper);
+        verifyNoInteractions(transactionInserter, outboxRepository, eventSerializer);
+    }
+
+    @Test
+    void returnsOriginalTransactionForAnIdenticalReplay() {
+        var existing = new PaymentTransaction(
+                TRANSACTION_ID,
+                "TXN-88213-ABC",
+                150_000L,
+                "INR",
+                TransactionType.DEBIT,
+                TransactionStatus.PENDING,
+                "1234567890",
+                "9876543210",
+                PaymentChannel.UPI,
+                NOW,
+                Map.of("orderId", "ORDER-99")
+        );
+        when(transactionRepository.findByExternalReference("TXN-88213-ABC"))
+                .thenReturn(Optional.of(existing));
+
+        var result = service.create(request());
+
+        assertThat(result.created()).isFalse();
+        assertThat(result.transaction().transactionId()).isEqualTo(TRANSACTION_ID);
+        verifyNoInteractions(transactionInserter, outboxRepository, eventSerializer);
     }
 
     @Test

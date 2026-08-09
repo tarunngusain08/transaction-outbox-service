@@ -34,10 +34,12 @@ public class TransactionController {
     public ResponseEntity<TransactionResponse> create(
             @Valid @RequestBody CreateTransactionRequest request
     ) {
-        var transaction = transactionService.create(request);
-        return ResponseEntity
-                .created(URI.create("/api/v1/transactions/" + transaction.transactionId()))
-                .body(transaction);
+        var result = transactionService.create(request);
+        var transaction = result.transaction();
+        var location = URI.create("/api/v1/transactions/" + transaction.transactionId());
+        return result.created()
+                ? ResponseEntity.created(location).body(transaction)
+                : ResponseEntity.ok().location(location).body(transaction);
     }
 
     @GetMapping("/{transactionId}")

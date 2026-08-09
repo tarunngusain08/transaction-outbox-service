@@ -3,6 +3,8 @@ package io.github.tarunngusain08.payments.integration;
 import io.github.tarunngusain08.payments.outbox.OutboxEventRepository;
 import io.github.tarunngusain08.payments.outbox.OutboxStatus;
 import io.github.tarunngusain08.payments.transaction.PaymentTransactionRepository;
+import io.github.tarunngusain08.payments.transaction.TransactionCreatedEvent;
+import io.github.tarunngusain08.payments.transaction.TransactionEventSerializer;
 import io.github.tarunngusain08.payments.transaction.api.TransactionResponse;
 import org.apache.kafka.clients.consumer.ConsumerConfig;
 import org.apache.kafka.clients.consumer.KafkaConsumer;
@@ -14,6 +16,7 @@ import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.test.web.server.LocalServerPort;
 import org.springframework.http.HttpStatus;
 import org.springframework.test.annotation.DirtiesContext;
+import org.springframework.test.context.bean.override.mockito.MockitoSpyBean;
 import org.springframework.test.context.DynamicPropertyRegistry;
 import org.springframework.test.context.DynamicPropertySource;
 import org.testcontainers.junit.jupiter.Container;
@@ -35,6 +38,8 @@ import java.util.UUID;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.awaitility.Awaitility.await;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.doThrow;
 
 @Testcontainers
 @DirtiesContext(classMode = DirtiesContext.ClassMode.AFTER_CLASS)
@@ -48,7 +53,10 @@ class TransactionPipelineIT {
 
     @Container
     static final PostgreSQLContainer POSTGRES = new PostgreSQLContainer(
-            DockerImageName.parse("postgres:17.10-alpine")
+            DockerImageName.parse(
+                    "postgres:17.10-alpine@sha256:"
+                            + "742f40ea20b9ff2ff31db5458d127452988a2164df9e17441e191f3b72252193"
+            ).asCompatibleSubstituteFor("postgres")
     )
             .withDatabaseName("payments")
             .withUsername("payments")
@@ -56,7 +64,10 @@ class TransactionPipelineIT {
 
     @Container
     static final KafkaContainer KAFKA = new KafkaContainer(
-            DockerImageName.parse("apache/kafka:4.1.2")
+            DockerImageName.parse(
+                    "apache/kafka:4.1.2@sha256:"
+                            + "5cc2a2fd93fa2687b44015eee04fb2c3edd9e526bd64bf8bec5ff1e268772e0e"
+            ).asCompatibleSubstituteFor("apache/kafka")
     );
 
     @DynamicPropertySource
@@ -79,6 +90,9 @@ class TransactionPipelineIT {
 
     @Autowired
     private OutboxEventRepository outboxRepository;
+
+    @MockitoSpyBean
+    private TransactionEventSerializer eventSerializer;
 
     private final HttpClient httpClient = HttpClient.newHttpClient();
 
@@ -110,8 +124,17 @@ class TransactionPipelineIT {
         String kafkaPayload = consumeEvent(externalReference);
         var event = objectMapper.readTree(kafkaPayload);
         assertThat(event.path("eventType").asString()).isEqualTo("TRANSACTION_CREATED");
+        assertThat(event.path("schemaVersion").asInt()).isEqualTo(1);
+        assertThat(event.path("producer").asString()).isEqualTo("transaction-outbox-service");
         assertThat(event.path("transaction").path("transactionId").asString())
                 .isEqualTo(transaction.transactionId().toString());
+
+        var outboxSnapshot = get("/actuator/outbox");
+        assertThat(outboxSnapshot.statusCode()).isEqualTo(HttpStatus.OK.value());
+        var snapshot = objectMapper.readTree(outboxSnapshot.body());
+        assertThat(snapshot.path("pending").asLong()).isZero();
+        assertThat(snapshot.path("processing").asLong()).isZero();
+        assertThat(snapshot.path("failed").asLong()).isZero();
     }
 
     @Test
@@ -121,7 +144,11 @@ class TransactionPipelineIT {
         assertThat(post("/api/v1/transactions", canonicalRequest(externalReference)).statusCode())
                 .isEqualTo(HttpStatus.CREATED.value());
         assertThat(post("/api/v1/transactions", canonicalRequest(externalReference)).statusCode())
-                .isEqualTo(HttpStatus.CONFLICT.value());
+                .isEqualTo(HttpStatus.OK.value());
+        assertThat(post(
+                "/api/v1/transactions",
+                canonicalRequest(externalReference).replace("150000", "999")
+        ).statusCode()).isEqualTo(HttpStatus.CONFLICT.value());
         assertThat(post("/api/v1/transactions", invalidCanonicalRequest()).statusCode())
                 .isEqualTo(HttpStatus.BAD_REQUEST.value());
 
@@ -147,11 +174,132 @@ class TransactionPipelineIT {
         assertThat(outboxRepository.count()).isZero();
     }
 
+    @Test
+    void rollsBackTheTransactionInsertWhenEventSerializationFails() throws Exception {
+        doThrow(new IllegalStateException("forced serialization failure"))
+                .when(eventSerializer)
+                .serialize(any(TransactionCreatedEvent.class));
+
+        var response = post(
+                "/api/v1/transactions",
+                canonicalRequest("IT-ROLLBACK-" + UUID.randomUUID())
+        );
+
+        assertThat(response.statusCode()).isEqualTo(HttpStatus.INTERNAL_SERVER_ERROR.value());
+        assertThat(transactionRepository.count()).isZero();
+        assertThat(outboxRepository.count()).isZero();
+    }
+
+    @Test
+    void rejectsUuidCollisionWithoutChangingTheOriginalTransaction() throws Exception {
+        UUID transactionId = UUID.randomUUID();
+        String originalReference = "IT-ID-ORIGINAL-" + UUID.randomUUID();
+        String conflictingReference = "IT-ID-CONFLICT-" + UUID.randomUUID();
+
+        assertThat(post(
+                "/api/v1/transactions",
+                canonicalRequest(transactionId, originalReference, 150_000L, "INR", "DEBIT")
+        ).statusCode()).isEqualTo(HttpStatus.CREATED.value());
+
+        await().atMost(Duration.ofSeconds(15)).untilAsserted(() ->
+                assertThat(outboxRepository.findAll())
+                        .singleElement()
+                        .extracting(event -> event.getStatus())
+                        .isEqualTo(OutboxStatus.PUBLISHED));
+
+        var collision = post(
+                "/api/v1/transactions",
+                canonicalRequest(transactionId, conflictingReference, 999L, "USD", "CREDIT")
+        );
+
+        assertThat(collision.statusCode()).isEqualTo(HttpStatus.CONFLICT.value());
+        var stored = transactionRepository.findById(transactionId).orElseThrow();
+        assertThat(stored.getExternalReference()).isEqualTo(originalReference);
+        assertThat(stored.getAmountMinor()).isEqualTo(150_000L);
+        assertThat(stored.getCurrency()).isEqualTo("INR");
+        assertThat(stored.getType().name()).isEqualTo("DEBIT");
+        assertThat(outboxRepository.count()).isEqualTo(1);
+    }
+
+    @Test
+    void rejectsLossyOrAmbiguousCanonicalJsonWithoutDurableWrites() throws Exception {
+        String referencePrefix = "IT-STRICT-" + UUID.randomUUID();
+        List<String> invalidRequests = List.of(
+                canonicalRequest(referencePrefix + "-DECIMAL").replace("150000", "100.99"),
+                canonicalRequest(referencePrefix + "-STRING").replace("150000", "\"100\""),
+                canonicalRequest(referencePrefix + "-EXPONENT").replace("150000", "1e2"),
+                canonicalRequest(referencePrefix + "-OVERFLOW")
+                        .replace("150000", "9223372036854775808"),
+                canonicalRequest(referencePrefix + "-ENUM").replace("\"DEBIT\"", "0"),
+                canonicalRequest(referencePrefix + "-UNKNOWN")
+                        .replace("\"metadata\"", "\"statuz\": \"SUCCESS\", \"metadata\""),
+                canonicalRequest(referencePrefix + "-CURRENCY").replace("\"INR\"", "\"XYZ\""),
+                canonicalRequest(referencePrefix + "-TIME").replace(
+                        "\"metadata\"",
+                        "\"createdAt\": \"+300000-01-01T00:00:00Z\", \"metadata\""
+                ),
+                canonicalRequest(referencePrefix + "-METADATA").replace(
+                        "\"integration\"",
+                        "\"" + "x".repeat(17_000) + "\""
+                ),
+                canonicalRequest(referencePrefix + "-DOMAIN-METADATA").replace(
+                        "\"integration\"",
+                        "\"" + "x".repeat(1_100) + "\""
+                )
+        );
+
+        for (String request : invalidRequests) {
+            assertThat(post("/api/v1/transactions", request).statusCode())
+                    .as("request must be rejected: %s", request.substring(0, Math.min(120, request.length())))
+                    .isEqualTo(HttpStatus.BAD_REQUEST.value());
+        }
+
+        assertThat(transactionRepository.count()).isZero();
+        assertThat(outboxRepository.count()).isZero();
+    }
+
+    @Test
+    void rejectsExtremeLegacyScalarsBeforeNormalization() throws Exception {
+        var response = post(
+                "/api/v1/transactions/normalize",
+                legacyRequest().replace("1500.00", "1e2147483647")
+        );
+
+        assertThat(response.statusCode()).isEqualTo(HttpStatus.BAD_REQUEST.value());
+        assertThat(transactionRepository.count()).isZero();
+        assertThat(outboxRepository.count()).isZero();
+    }
+
+    @Test
+    void canonicalizesExternalReferenceBeforeDuplicateDetectionAndPersistence() throws Exception {
+        String canonicalReference = "IT-SPACE-" + UUID.randomUUID();
+
+        var created = post("/api/v1/transactions", canonicalRequest("  " + canonicalReference + "  "));
+        assertThat(created.statusCode()).isEqualTo(HttpStatus.CREATED.value());
+        var body = objectMapper.readValue(created.body(), TransactionResponse.class);
+        assertThat(body.externalReference()).isEqualTo(canonicalReference);
+
+        var replay = post("/api/v1/transactions", canonicalRequest(canonicalReference));
+        assertThat(replay.statusCode()).isEqualTo(HttpStatus.OK.value());
+        assertThat(objectMapper.readValue(replay.body(), TransactionResponse.class).transactionId())
+                .isEqualTo(body.transactionId());
+        assertThat(transactionRepository.count()).isEqualTo(1);
+        assertThat(outboxRepository.count()).isEqualTo(1);
+    }
+
     private HttpResponse<String> post(String path, String body) throws Exception {
         var request = HttpRequest.newBuilder()
                 .uri(URI.create("http://localhost:" + port + path))
                 .header("Content-Type", "application/json")
                 .POST(HttpRequest.BodyPublishers.ofString(body))
+                .build();
+        return httpClient.send(request, HttpResponse.BodyHandlers.ofString());
+    }
+
+    private HttpResponse<String> get(String path) throws Exception {
+        var request = HttpRequest.newBuilder()
+                .uri(URI.create("http://localhost:" + port + path))
+                .GET()
                 .build();
         return httpClient.send(request, HttpResponse.BodyHandlers.ofString());
     }
@@ -193,6 +341,28 @@ class TransactionPipelineIT {
                   "metadata": {"testRun": "integration"}
                 }
                 """.formatted(externalReference);
+    }
+
+    private String canonicalRequest(
+            UUID transactionId,
+            String externalReference,
+            long amount,
+            String currency,
+            String type
+    ) {
+        return """
+                {
+                  "transactionId": "%s",
+                  "externalReference": "%s",
+                  "amount": %d,
+                  "currency": "%s",
+                  "type": "%s",
+                  "sourceAccount": "1234567890",
+                  "destinationAccount": "9876543210",
+                  "channel": "UPI",
+                  "metadata": {"testRun": "integration"}
+                }
+                """.formatted(transactionId, externalReference, amount, currency, type);
     }
 
     private String invalidCanonicalRequest() {

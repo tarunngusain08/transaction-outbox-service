@@ -2,9 +2,12 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    branches:
+      - main
+      - "tgusain/**"
   pull_request:
-    branches: [main]
+    branches:
+      - main
 
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
@@ -14,19 +17,25 @@ permissions:
   contents: read
 
 jobs:
-  lint:
+  static-analysis:
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 10
     steps:
       - name: Check out repository
-        uses: actions/checkout@v5
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
 
       - name: Set up Java 21
-        uses: actions/setup-java@v5
+        uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961 # v5
         with:
           distribution: temurin
           java-version: "21"
           cache: maven
+
+      - name: Set up Node.js 24
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: "24"
+          cache: npm
 
       - name: Validate Compose configuration
         run: docker compose config --quiet
@@ -34,60 +43,31 @@ jobs:
       - name: Lint Java and Python sources
         run: make lint
 
-  unit-tests:
+      - name: Validate Markdown, links, and Mermaid diagrams
+        env:
+          CHROME_BIN: /usr/bin/google-chrome
+        run: make docs-lint
+
+  tests-and-coverage:
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 15
     steps:
       - name: Check out repository
-        uses: actions/checkout@v5
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
 
       - name: Set up Java 21
-        uses: actions/setup-java@v5
+        uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961 # v5
         with:
           distribution: temurin
           java-version: "21"
           cache: maven
 
-      - name: Run unit tests
-        run: make unit-test
-
-  integration-tests:
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    steps:
-      - name: Check out repository
-        uses: actions/checkout@v5
-
-      - name: Set up Java 21
-        uses: actions/setup-java@v5
-        with:
-          distribution: temurin
-          java-version: "21"
-          cache: maven
-
-      - name: Run PostgreSQL and Kafka integration tests
-        run: make integration-test
-
-  coverage:
-    runs-on: ubuntu-latest
-    timeout-minutes: 12
-    steps:
-      - name: Check out repository
-        uses: actions/checkout@v5
-
-      - name: Set up Java 21
-        uses: actions/setup-java@v5
-        with:
-          distribution: temurin
-          java-version: "21"
-          cache: maven
-
-      - name: Enforce test coverage
+      - name: Run unit and PostgreSQL/Kafka integration tests with coverage
         run: make coverage
 
       - name: Upload coverage and test reports
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: coverage-and-test-reports
           path: |
@@ -96,16 +76,31 @@ jobs:
             target/failsafe-reports
           if-no-files-found: warn
 
+  dependency-review:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+
+      - name: Reject newly introduced vulnerable dependencies
+        uses: actions/dependency-review-action@2031cfc080254a8a887f58cffee85186f0e49e48 # v4.9.0
+        with:
+          fail-on-severity: moderate
+
   build:
-    needs: [lint, unit-tests, integration-tests]
+    needs:
+      - static-analysis
+      - tests-and-coverage
     runs-on: ubuntu-latest
     timeout-minutes: 12
     steps:
       - name: Check out repository
-        uses: actions/checkout@v5
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
 
       - name: Set up Java 21
-        uses: actions/setup-java@v5
+        uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961 # v5
         with:
           distribution: temurin
           java-version: "21"
@@ -120,12 +115,12 @@ jobs:
     timeout-minutes: 15
     steps:
       - name: Check out repository
-        uses: actions/checkout@v5
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
 
       - name: Run mixed pipeline traffic
         run: make traffic
 
-      - name: Run bounded concurrent load scenario
+      - name: Run bounded concurrent load acceptance
         run: make load-test LOAD_REQUESTS=40 LOAD_CONCURRENCY=8
 
       - name: Show application logs after failure

@@ -35,12 +35,28 @@ class OutboxEventTest {
     void marksEventPublishedAndKeepsAuditTimestamp() {
         var event = pendingEvent();
         var publishedAt = CREATED_AT.plusSeconds(2);
+        event.claim(UUID.randomUUID(), CREATED_AT.plusSeconds(1));
 
         event.markPublished(publishedAt);
 
         assertThat(event.getStatus()).isEqualTo(OutboxStatus.PUBLISHED);
         assertThat(event.getPublishedAt()).isEqualTo(publishedAt);
         assertThat(event.getLastError()).isNull();
+        assertThat(event.getClaimToken()).isNull();
+        assertThat(event.getClaimedAt()).isNull();
+    }
+
+    @Test
+    void capsExponentialRetryDelayAtFiveMinutes() {
+        var event = pendingEvent();
+
+        for (int attempt = 1; attempt <= 10; attempt++) {
+            event.recordFailure("broker unavailable", CREATED_AT, 12);
+        }
+
+        assertThat(event.getStatus()).isEqualTo(OutboxStatus.PENDING);
+        assertThat(event.getRetryCount()).isEqualTo(10);
+        assertThat(event.getNextAttemptAt()).isEqualTo(CREATED_AT.plusSeconds(300));
     }
 
     private OutboxEvent pendingEvent() {

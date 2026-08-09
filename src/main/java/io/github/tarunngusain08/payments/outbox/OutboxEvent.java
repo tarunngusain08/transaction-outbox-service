@@ -54,6 +54,12 @@ public class OutboxEvent {
     @Column(name = "last_error", length = MAX_ERROR_LENGTH)
     private String lastError;
 
+    @Column(name = "claim_token")
+    private UUID claimToken;
+
+    @Column(name = "claimed_at")
+    private Instant claimedAt;
+
     protected OutboxEvent() {
     }
 
@@ -78,15 +84,27 @@ public class OutboxEvent {
         return event;
     }
 
+    public void claim(UUID token, Instant claimedAt) {
+        this.status = OutboxStatus.PROCESSING;
+        this.claimToken = token;
+        this.claimedAt = claimedAt;
+    }
+
+    public boolean isClaimedBy(UUID token) {
+        return status == OutboxStatus.PROCESSING && token.equals(claimToken);
+    }
+
     public void markPublished(Instant publishedAt) {
         this.status = OutboxStatus.PUBLISHED;
         this.publishedAt = publishedAt;
         this.lastError = null;
+        clearClaim();
     }
 
     public void recordFailure(String error, Instant failedAt, int maxRetries) {
         retryCount++;
         lastError = truncate(error);
+        clearClaim();
 
         if (retryCount >= maxRetries) {
             status = OutboxStatus.FAILED;
@@ -94,8 +112,14 @@ public class OutboxEvent {
             return;
         }
 
-        long backoffSeconds = Math.min(300, 1L << Math.min(retryCount - 1, 8));
+        long backoffSeconds = Math.min(300, 1L << Math.min(retryCount - 1, 30));
+        status = OutboxStatus.PENDING;
         nextAttemptAt = failedAt.plus(Duration.ofSeconds(backoffSeconds));
+    }
+
+    private void clearClaim() {
+        claimToken = null;
+        claimedAt = null;
     }
 
     private String truncate(String value) {
@@ -135,5 +159,13 @@ public class OutboxEvent {
 
     public String getLastError() {
         return lastError;
+    }
+
+    public UUID getClaimToken() {
+        return claimToken;
+    }
+
+    public Instant getClaimedAt() {
+        return claimedAt;
     }
 }
