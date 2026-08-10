@@ -60,7 +60,7 @@ migration-preflight: ## Read-only V2 identity/currency worklist before applying 
 	docker compose up --detach --wait postgres
 	docker compose exec -T postgres psql -X -U payments -d payments < scripts/sql/preflight_v3_transaction_identity.sql
 
-migration-v7-preflight: ## Gate V7 on the historical unpublished-event count.
+migration-v7-preflight: ## Fail unless canonical V6 has zero unpublished events.
 	docker compose up --detach --wait postgres
 	docker compose exec -T postgres psql -X -U payments -d payments < scripts/sql/preflight_v7_event_compatibility.sql
 
