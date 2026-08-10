@@ -49,7 +49,7 @@ FROM (
     HAVING COUNT(*) > 1
 ) AS collisions;
 
-\echo 'V1 contract violations (must return no rows)'
+\echo 'V2 contract violations (must return no rows)'
 SELECT
     id AS transaction_id,
     external_reference,

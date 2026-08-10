@@ -1,8 +1,13 @@
-# ADR 0001: Version 1 ingestion, identity, and delivery contracts
+# ADR 0001: Original ingestion, identity, and delivery contracts
 
-- Status: accepted
+- Status: superseded by [ADR 0002](0002-api-event-versioning.md)
 - Date: 2026-08-10
-- Scope: version 1 of the synthetic transaction-ingestion service
+- Scope: the original proposed V1 hardening rules, adopted as V2 by ADR 0002
+
+This document preserves the reasoning that selected the strict contract. The
+prototype already had an incompatible V1 shape, so ADR 0002 corrects the public
+API/event version labels. The rules below govern the active V2 contract; V1 is
+retired rather than silently reinterpreted.
 
 ## Context
 
@@ -19,7 +24,7 @@ It does not authorize, move, settle, reconcile, refund, or account for money.
 
 ### Money
 
-- Version 1 supports only `INR`.
+- The active V2 contract supports only `INR`.
 - INR has minor-unit exponent `2`.
 - Canonical `amount` is a positive signed-64-bit integer count of paise.
 - Legacy `txn_amount` is a positive plain-decimal rupee value. It must convert
@@ -55,7 +60,7 @@ uniqueness, and fingerprint comparison agree.
 - `transactionId` is a server-generated UUID and is not accepted in a create
   request.
 - `status` is server-owned, starts as `PENDING`, and is not accepted in a create
-  request. Version 1 has no status-transition endpoint.
+  request. V2 has no status-transition endpoint.
 - `createdAt` is the source-owned business occurrence time. It is optional; when
   omitted, the server uses `receivedAt`.
 - `receivedAt` is the server-owned ingestion time and is never accepted from a
@@ -136,8 +141,9 @@ reference and includes every original row identity.
 - Resolution requires an approved source namespace, alias/supersession record,
   or data correction with its own audit evidence.
 - Only non-colliding padded references are canonicalized. Their old and new
-  values are recorded in an immutable migration audit table in the same
-  transaction as the update.
+  values are recorded in a row-mutation-protected migration audit table in the
+  same transaction as the update. The trigger is not owner-proof,
+  tamper-evident, or equivalent to immutable audit storage.
 - Existing unsupported currency or identifier data is also reported for manual
   reconciliation rather than silently coerced.
 
@@ -153,7 +159,7 @@ retain evidence of the applied state.
   must exceed the configured Kafka blocking bound, acknowledgement wait, and a
   safety margin.
 - A normal delivery failure returns the row to `PENDING`, increments its failure
-  count, and schedules capped exponential backoff. Version 1 does not
+  count, and schedules capped exponential backoff. V2 does not
   automatically strand events in terminal `FAILED`; it retries indefinitely.
 - An interrupted sender leaves the row `PROCESSING` without consuming a retry.
   Lease expiry makes ownership recoverable by another poller.
@@ -183,9 +189,9 @@ Executable tests introduced with each remediation must cover at least:
 
 ## Consequences
 
-The API becomes narrower and intentionally breaking relative to the local,
-unpublished prototype: callers must provide `sourceSystem` and may no longer
-provide ID or status. PostgreSQL-specific insert-on-conflict behavior is an
-accepted implementation dependency. Legacy rows without fingerprints or rows
-that violate the new identity/money policy require explicit operator work; the
-service will not manufacture equivalence to make an upgrade pass.
+The V2 API is narrower and intentionally breaking relative to V1: callers must
+provide `sourceSystem` and may no longer provide ID or status. PostgreSQL-specific
+insert-on-conflict behavior is an accepted implementation dependency. Legacy
+rows without fingerprints or rows that violate the new identity/money policy
+require explicit operator work; the service will not manufacture equivalence to
+make an upgrade pass.

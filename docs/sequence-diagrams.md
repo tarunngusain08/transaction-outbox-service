@@ -22,7 +22,7 @@ sequenceDiagram
     participant OutboxRepo as Outbox repository
     participant DB as PostgreSQL
 
-    Client->>MVC: POST /api/v1/transactions
+    Client->>MVC: POST /api/v2/transactions
     MVC->>Controller: Valid CreateTransactionRequest
     Controller->>Service: create(request)
     Note over Service,DB: Spring opens the transaction before create method logic executes
@@ -32,7 +32,7 @@ sequenceDiagram
     Service->>Inserter: insertIfAbsent(transaction)
     Inserter->>DB: INSERT ... ON CONFLICT DO NOTHING RETURNING id
     DB-->>Inserter: New transaction id
-    Service->>Service: Serialize version-1 TRANSACTION_CREATED with a new eventId
+    Service->>Service: Serialize schema-version-2 TRANSACTION_CREATED with a new eventId
     Service->>OutboxRepo: save(PENDING event)
     OutboxRepo-->>Service: Managed event (SQL may be deferred)
     Service->>DB: Flush pending outbox INSERT and commit
@@ -54,7 +54,7 @@ sequenceDiagram
     participant DB as PostgreSQL
     participant Handler as ApiExceptionHandler
 
-    Client->>MVC: POST /api/v1/transactions
+    Client->>MVC: POST /api/v2/transactions
     alt Bean validation fails
         MVC->>Handler: MethodArgumentNotValidException
         Handler-->>Client: 400 ProblemDetail + field errors
@@ -98,7 +98,7 @@ sequenceDiagram
     participant DB as PostgreSQL
     participant Handler as ApiExceptionHandler
 
-    Client->>MVC: GET /api/v1/transactions/{transactionId}
+    Client->>MVC: GET /api/v2/transactions/{transactionId}
     alt Path value is not a UUID
         MVC-->>Client: 400 Bad Request
     else UUID is valid
@@ -131,7 +131,7 @@ sequenceDiagram
     participant Normalizer as TransactionNormalizer
     participant Handler as ApiExceptionHandler
 
-    Client->>MVC: POST /api/v1/transactions/normalize
+    Client->>MVC: POST /api/v2/transactions/normalize
     alt Required field/IFSC shape or currency is invalid/unsupported
         MVC->>Handler: MethodArgumentNotValidException
         Handler-->>Client: 400 ProblemDetail + field errors
@@ -154,6 +154,24 @@ sequenceDiagram
             Note over Client,Normalizer: No PostgreSQL write and no Kafka publish occur
         end
     end
+```
+
+### UC-09 — Reject retired API V1 explicitly
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor Client as Legacy API client
+    participant Retired as RetiredV1TransactionController
+    participant Service as TransactionService
+    participant DB as PostgreSQL
+    participant Kafka as Kafka broker
+
+    Client->>Retired: POST or GET /api/v1/transactions route
+    Retired-->>Client: 410 Gone + stable ProblemDetail + V2 successor Link
+    Note over Retired,Service: V1 body is not bound or reinterpreted as V2
+    Note over Service,DB: No service call and no transaction/outbox write
+    Note over DB,Kafka: No row and no event are created
 ```
 
 ### UC-04, UC-05, UC-06 — Deliver, retry, or recover an outbox event
@@ -221,6 +239,32 @@ sequenceDiagram
     Note over Delivery,Kafka: Acknowledgement plus finalize failure or lease expiry can produce a duplicate publish
 ```
 
+### UC-10 — Quarantine pre-V2 unpublished events
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor Operator as Deployment operator
+    participant Writers as Application writers / pollers
+    participant Flyway as Flyway V6
+    participant DB as PostgreSQL
+    participant Publisher as V2 outbox publisher
+    participant Kafka as Kafka broker
+
+    Operator->>Writers: Stop every writer and poller
+    Operator->>DB: Snapshot and inventory unpublished historical rows
+    Operator->>Flyway: Apply V6 in one migration transaction
+    Flyway->>DB: Add quarantine evidence columns
+    Flyway->>DB: Move existing PENDING / PROCESSING / FAILED to QUARANTINED
+    Flyway->>DB: Preserve payload, retry/error/timestamps/prior status and clear claims
+    Flyway->>DB: Install and validate delivery-state constraints, then commit
+    Operator->>Writers: Start V2 application after migration verification
+    Publisher->>DB: Claim only due PENDING or expired PROCESSING
+    DB-->>Publisher: New V2 event or empty, never QUARANTINED
+    Publisher->>Kafka: Publish only when a claimable V2 event exists
+    Note over DB,Kafka: Historical payload remains stored and cannot reach Kafka through the ordinary publisher
+```
+
 ### UC-04 — Claim disjoint work across concurrent pollers
 
 ```mermaid
@@ -273,7 +317,7 @@ sequenceDiagram
     else Separate asynchronous-delivery inspection
         Probe->>Actuator: GET /actuator/outbox
         Actuator->>Outbox: snapshot()
-        Outbox->>DB: Count PENDING / PROCESSING and find oldest unpublished
+        Outbox->>DB: Count PENDING / PROCESSING / QUARANTINED and find oldest ages
         DB-->>Outbox: Delivery state
         Outbox-->>Probe: Counts, age in seconds, and checkedAt
     end
@@ -289,8 +333,8 @@ sequenceDiagram
     participant DB as PostgreSQL
 
     Operator->>PSQL: Query outbox_events
-    PSQL->>DB: SELECT id, aggregate_id, status, retry_count, last_error, published_at
-    DB-->>PSQL: Retained PENDING / PROCESSING / PUBLISHED rows
+    PSQL->>DB: SELECT status, retry/error, claim/publication, and quarantine evidence
+    DB-->>PSQL: Retained PENDING / PROCESSING / PUBLISHED / QUARANTINED rows
     PSQL-->>Operator: Mutable operational and diagnostic view
     Note over Operator,DB: Current scope is read-only SQL with no operator HTTP API or replay command
 ```
@@ -394,6 +438,7 @@ sequenceDiagram
     Make->>Simulator: Start unique run prefix
     alt Smoke mode
         Simulator->>API: Sequential valid creates, duplicate, invalid create, normalize success/failure, GET
+        Simulator->>API: Retired V1 request expecting 410 and no durable state
     else Load mode
         Simulator->>API: Concurrent unique valid creates and intentional invalid creates
         Simulator->>API: Duplicate probe and normalization probe
@@ -560,4 +605,43 @@ sequenceDiagram
         CI->>Deploy: Allow versioned producer deployment
         Deploy-->>Developer: Gate passed
     end
+```
+
+### UC-P08 — Planned quarantined-payload compatibility review
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor Operator as Authorized operator
+    participant Tool as Planned compatibility tool
+    participant Auth as Authorization policy
+    participant DB as PostgreSQL
+    participant Validator as Versioned schema validator / transformer
+    participant Audit as Approved audit store
+    participant Poller as Existing V2 outbox poller
+    participant Kafka as Kafka broker
+
+    Operator->>Tool: Select quarantined event + reason + proposed action
+    Tool->>Auth: Verify compatibility-review permission and principal
+    alt Permission denied
+        Auth-->>Operator: Reject with no state change
+    else Authorized
+        Tool->>DB: Read and lock QUARANTINED evidence
+        DB-->>Tool: Original payload, identity, prior status, and diagnostics
+        Tool->>Validator: Parse declared/historical schema and validate explicit V2 transform
+        alt Schema unknown, transform lossy, or policy unresolved
+            Validator-->>Tool: Reject with diagnostic reason
+            Tool->>Audit: Record denied review while original remains QUARANTINED
+            Tool-->>Operator: No replacement created
+        else Reviewed transformation is valid
+            Validator-->>Tool: Canonical V2 payload + compatibility evidence
+            Tool->>Audit: Record actor, reason, original hash/ID, transform version, and event-ID policy
+            Tool->>DB: Preserve original and atomically insert causally linked PENDING V2 replacement
+            DB-->>Tool: Commit replacement identity
+            Tool-->>Operator: Reviewed replacement accepted
+            Poller->>DB: Claim replacement through ordinary V2 flow
+            Poller->>Kafka: Publish schema-version-2 replacement
+        end
+    end
+    Note over Tool,Kafka: Exact event-ID and consumer-dedup semantics require approval before implementation
 ```

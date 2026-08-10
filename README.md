@@ -24,11 +24,17 @@ on `eventId`. Published rows are retained as mutable operational history; a real
 audit archive is a production follow-up in
 [the architecture notes](docs/architecture.md).
 
+The active public contract is V2. Requests to the retired V1 transaction routes
+receive `410 Gone` with a `Link` header naming `/api/v2/transactions`; they are
+never reinterpreted as V2 requests.
+
 Detailed behavioral documentation:
 
-- [V1 contract decision](docs/decisions/0001-v1-ingestion-contract.md) — exact
-  money, identity, ownership, idempotency, metadata, migration, normalization,
-  and outbox-recovery rules.
+- [V2 versioning decision](docs/decisions/0002-api-event-versioning.md) — active
+  API/event versions, explicit V1 retirement, and historical-event quarantine.
+- [Ingestion contract decision](docs/decisions/0001-v1-ingestion-contract.md) —
+  exact money, identity, ownership, idempotency, metadata, migration,
+  normalization, and outbox rules adopted by V2.
 - [Use-case model](docs/use-cases.md) — complete implemented and planned scope,
   with actors, triggers, outcomes, and explicit status.
 - [Sequence-diagram catalog](docs/sequence-diagrams.md) — success, rejection,
@@ -91,7 +97,7 @@ runs. `make reset` explicitly deletes both local volumes.
 Amounts are integer minor units: `150000` means INR 1,500.00.
 
 ```bash
-curl -i -X POST http://localhost:8080/api/v1/transactions \
+curl -i -X POST http://localhost:8080/api/v2/transactions \
   -H 'Content-Type: application/json' \
   --data @examples/create-transaction.json
 ```
@@ -104,6 +110,10 @@ defaults to `receivedAt`. An identical replay of the same case-sensitive
 `(sourceSystem, externalReference)` returns the original record with `200 OK`;
 a conflicting replay returns `409 Conflict`.
 
+`sourceSystem` is currently asserted by the caller, not derived from an
+authenticated principal or route configuration. That is sufficient for this
+synthetic exercise but is not a trustworthy production identity boundary.
+
 Canonical JSON is strict: duplicate or unknown fields, numeric enum ordinals,
 numeric strings, fractional/exponent representations for minor units,
 non-`INR` currencies, non-canonical ASCII identifiers, unreasonable timestamps,
@@ -113,13 +123,13 @@ coerced or silently ignored. Metadata numbers are signed 64-bit integers.
 Fetch the stored record:
 
 ```bash
-curl http://localhost:8080/api/v1/transactions/{transactionId}
+curl http://localhost:8080/api/v2/transactions/{transactionId}
 ```
 
 ### Normalize a legacy record
 
 ```bash
-curl -sS -X POST http://localhost:8080/api/v1/transactions/normalize \
+curl -sS -X POST http://localhost:8080/api/v2/transactions/normalize \
   -H 'Content-Type: application/json' \
   --data @examples/legacy-transaction.json
 ```
@@ -153,7 +163,7 @@ Inspect outbox state:
 
 ```bash
 docker compose exec postgres psql -U payments -d payments -c \
-  "SELECT id, aggregate_id, status, retry_count, published_at FROM outbox_events ORDER BY created_at;"
+  "SELECT id, aggregate_id, status, retry_count, published_at, quarantined_at, quarantine_reason FROM outbox_events ORDER BY created_at;"
 ```
 
 Inspect asynchronous delivery separately from basic application health:
@@ -162,10 +172,11 @@ Inspect asynchronous delivery separately from basic application health:
 curl http://localhost:8080/actuator/outbox
 ```
 
-The response reports `PENDING` and `PROCESSING` counts plus the age of the
-oldest unpublished row. Delivery failures remain recoverable and retry with
-capped backoff; this endpoint is an operational signal, not a mutation
-interface.
+The response reports `PENDING`, `PROCESSING`, and `QUARANTINED` counts, the age
+of the oldest publishable row, and the age of the oldest quarantined row.
+Current V2 delivery failures remain recoverable and retry with capped backoff.
+Quarantined historical payloads require a future authenticated compatibility
+workflow; this endpoint is an operational signal, not a mutation interface.
 
 ## Build and test
 
@@ -178,7 +189,9 @@ claim/finalize state transitions, Kafka acknowledgement, interruption, and retry
 scheduling. The integration suite boots the real HTTP application against
 ephemeral PostgreSQL and Kafka, then proves insert-only persistence, strict JSON
 rejection, idempotent replay, Flyway constraints, atomic transaction/outbox
-commit, and a versioned consumed event. The JaCoCo HTML report is written to
+commit, and a versioned consumed event. It also upgrades a realistic unpublished
+V1 event, proves it is quarantined, starts the real scheduler, and verifies that
+only a new V2 event reaches Kafka. The JaCoCo HTML report is written to
 `target/site/jacoco/index.html`.
 
 ### End-to-end traffic and load
@@ -210,7 +223,8 @@ The load report includes status distribution, throughput, and p50/p95/p99 HTTP
 latency for primary requests. Defaults require at least 1 request/second and at
 most 3000 ms p95; override `LOAD_MIN_THROUGHPUT` and `LOAD_MAX_P95_MS` for the
 machine under test. This is a bounded local acceptance scenario, not a capacity
-or production SLO benchmark. Each run uses a unique reference prefix.
+or production SLO benchmark, degradation/failure-mode test, HA exercise, or DR
+proof. Each run uses a unique reference prefix.
 
 ## Continuous integration
 
@@ -252,10 +266,15 @@ those bounds cannot silently drift apart.
 For retry, concurrency, operational retention, and production-hardening details, see
 [docs/architecture.md](docs/architecture.md).
 
-Before upgrading a retained V2 database, follow the
+Before upgrading a database at Flyway migration V2, follow the
 [V3 identity migration runbook](docs/migrations/v3-identity-migration.md). A
 collision aborts before mutation; no historical transaction is automatically
 merged, renamed, deleted, moved, or selected as a winner.
+
+Before applying V6 to a database containing unpublished events, follow the
+[V6 event-quarantine runbook](docs/migrations/v6-event-quarantine.md). This
+prototype expects writers and pollers to be stopped while Flyway runs; it does
+not claim a rolling or zero-downtime schema upgrade.
 
 ## Scope and license
 

@@ -2,7 +2,7 @@
 
 V3 replaces the unpublished prototype migration with a fail-before-mutation
 upgrade. It introduces source-scoped references, server receipt time, durable
-request-fingerprint columns, and the V1 INR/identifier constraints.
+request-fingerprint columns, and the V2 INR/identifier constraints.
 
 ## Before migration
 
@@ -50,8 +50,11 @@ GROUP BY source_system, external_reference
 HAVING COUNT(*) > 1;
 ```
 
-The second query must return no rows. The audit table rejects row-level inserts,
-updates, and deletes after migration.
+The second query must return no rows. The audit table rejects ordinary row-level
+inserts, updates, and deletes after migration. This is row-mutation protection,
+not immutability: a sufficiently privileged database owner can disable or drop
+the trigger/table. Production audit requirements need restricted ownership,
+separate append-only storage, and tamper-evidence.
 
 Historical transactions have `sourceSystem=DIRECT_API`,
 `receivedAt=<migration time>`, and a null request fingerprint. The service does
