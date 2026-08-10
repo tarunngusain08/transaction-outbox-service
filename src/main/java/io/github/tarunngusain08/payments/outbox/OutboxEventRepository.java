@@ -12,6 +12,23 @@ import java.util.UUID;
 
 public interface OutboxEventRepository extends JpaRepository<OutboxEvent, UUID> {
 
+    String DELIVERY_STATE_SUMMARY_SQL = """
+            SELECT
+                COUNT(*) FILTER (WHERE status = 'PENDING') AS pending,
+                COUNT(*) FILTER (WHERE status = 'PROCESSING') AS processing,
+                COUNT(*) FILTER (WHERE status = 'QUARANTINED') AS quarantined,
+                MIN(created_at) FILTER (
+                    WHERE status IN ('PENDING', 'PROCESSING')
+                ) AS "oldestUnpublishedAt",
+                MIN(quarantined_at) FILTER (
+                    WHERE status = 'QUARANTINED'
+                ) AS "oldestQuarantinedAt"
+            FROM outbox_events
+            WHERE status = 'PENDING'
+               OR status = 'PROCESSING'
+               OR status = 'QUARANTINED'
+            """;
+
     @Query(value = """
             SELECT id
             FROM outbox_events
@@ -30,19 +47,6 @@ public interface OutboxEventRepository extends JpaRepository<OutboxEvent, UUID> 
     @Query("SELECT event FROM OutboxEvent event WHERE event.id = :id")
     Optional<OutboxEvent> findByIdForUpdate(@Param("id") UUID id);
 
-    @Query(value = """
-            SELECT
-                COUNT(*) FILTER (WHERE status = 'PENDING') AS pending,
-                COUNT(*) FILTER (WHERE status = 'PROCESSING') AS processing,
-                COUNT(*) FILTER (WHERE status = 'QUARANTINED') AS quarantined,
-                MIN(created_at) FILTER (
-                    WHERE status IN ('PENDING', 'PROCESSING')
-                ) AS "oldestUnpublishedAt",
-                MIN(quarantined_at) FILTER (
-                    WHERE status = 'QUARANTINED'
-                ) AS "oldestQuarantinedAt"
-            FROM outbox_events
-            WHERE status IN ('PENDING', 'PROCESSING', 'QUARANTINED')
-            """, nativeQuery = true)
+    @Query(value = DELIVERY_STATE_SUMMARY_SQL, nativeQuery = true)
     OutboxDeliveryState summarizeDeliveryState();
 }

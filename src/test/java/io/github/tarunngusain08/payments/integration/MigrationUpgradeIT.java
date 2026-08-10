@@ -1,5 +1,6 @@
 package io.github.tarunngusain08.payments.integration;
 
+import io.github.tarunngusain08.payments.outbox.OutboxEventRepository;
 import org.flywaydb.core.Flyway;
 import org.flywaydb.core.api.MigrationVersion;
 import org.flywaydb.core.api.FlywayException;
@@ -170,6 +171,47 @@ class MigrationUpgradeIT {
                 .hasMessageContaining("chk_outbox_publishable_schema_v2");
     }
 
+    @Test
+    void deliverySummaryUsesPartialIndexesWithLargePublishedHistory() throws Exception {
+        String schema = createSchema("outbox_monitoring_plan");
+        flyway(schema, null).migrate();
+        UUID transactionId = insertV2Transaction(schema, "OUTBOX-MONITORING-PLAN");
+        insertRetainedOutboxFixture(schema, transactionId);
+
+        StringBuilder plan = new StringBuilder();
+        try (var connection = connection(); var statement = connection.createStatement()) {
+            statement.execute("SET search_path TO " + schema);
+            statement.execute("ANALYZE outbox_events");
+
+            try (var summary = statement.executeQuery(
+                    OutboxEventRepository.DELIVERY_STATE_SUMMARY_SQL
+            )) {
+                assertThat(summary.next()).isTrue();
+                assertThat(summary.getLong("pending")).isEqualTo(100);
+                assertThat(summary.getLong("processing")).isEqualTo(100);
+                assertThat(summary.getLong("quarantined")).isEqualTo(100);
+            }
+
+            try (var rows = statement.executeQuery(
+                    "EXPLAIN (ANALYZE, BUFFERS, COSTS OFF) "
+                            + OutboxEventRepository.DELIVERY_STATE_SUMMARY_SQL
+            )) {
+                while (rows.next()) {
+                    plan.append(rows.getString(1)).append('\n');
+                }
+            }
+        }
+
+        assertThat(plan.toString())
+                .contains(
+                        "BitmapOr",
+                        "idx_outbox_pending_claimable",
+                        "idx_outbox_processing_claimable",
+                        "idx_outbox_quarantined_at"
+                )
+                .doesNotContain("Seq Scan on outbox_events");
+    }
+
     private String createSchema(String prefix) throws SQLException {
         String schema = prefix + "_" + UUID.randomUUID().toString().replace("-", "");
         try (var connection = connection(); var statement = connection.createStatement()) {
@@ -256,6 +298,65 @@ class MigrationUpgradeIT {
             assertThat(statement.executeUpdate()).isOne();
         }
         return eventId;
+    }
+
+    private void insertRetainedOutboxFixture(String schema, UUID transactionId)
+            throws SQLException {
+        try (var connection = connection();
+             var statement = connection.prepareStatement("""
+                     WITH generated AS (
+                         SELECT
+                             sequence_number,
+                             CASE
+                                 WHEN sequence_number <= 200000 THEN 'PUBLISHED'
+                                 WHEN sequence_number <= 200100 THEN 'PENDING'
+                                 WHEN sequence_number <= 200200 THEN 'PROCESSING'
+                                 ELSE 'QUARANTINED'
+                             END AS event_status
+                         FROM GENERATE_SERIES(1, 200300) AS sequence_number
+                     )
+                     INSERT INTO %s.outbox_events (
+                         id, aggregate_type, aggregate_id, event_type, payload, status,
+                         created_at, published_at, next_attempt_at, retry_count, last_error,
+                         claim_token, claimed_at, quarantined_at, quarantine_reason,
+                         quarantined_from_status
+                     )
+                     SELECT
+                         GEN_RANDOM_UUID(),
+                         'TRANSACTION',
+                         ?,
+                         'TRANSACTION_CREATED',
+                         CASE
+                             WHEN event_status = 'QUARANTINED' THEN '{}'::JSONB
+                             ELSE '{"schemaVersion":2}'::JSONB
+                         END,
+                         event_status,
+                         TIMESTAMPTZ '2026-08-08 09:02:11+00',
+                         CASE
+                             WHEN event_status = 'PUBLISHED'
+                                 THEN TIMESTAMPTZ '2026-08-08 09:02:12+00'
+                         END,
+                         TIMESTAMPTZ '2026-08-08 09:02:11+00',
+                         0,
+                         NULL,
+                         CASE WHEN event_status = 'PROCESSING' THEN GEN_RANDOM_UUID() END,
+                         CASE
+                             WHEN event_status = 'PROCESSING'
+                                 THEN TIMESTAMPTZ '2026-08-08 09:02:11+00'
+                         END,
+                         CASE
+                             WHEN event_status = 'QUARANTINED'
+                                 THEN TIMESTAMPTZ '2026-08-08 09:02:13+00'
+                         END,
+                         CASE
+                             WHEN event_status = 'QUARANTINED' THEN 'retained test fixture'
+                         END,
+                         CASE WHEN event_status = 'QUARANTINED' THEN 'PENDING' END
+                     FROM generated
+                     """.formatted(schema))) {
+            statement.setObject(1, transactionId);
+            assertThat(statement.executeUpdate()).isEqualTo(200_300);
+        }
     }
 
     private String historicalV1Payload(UUID eventId, UUID transactionId) {
