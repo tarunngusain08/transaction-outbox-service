@@ -36,10 +36,10 @@ clean: ## Remove Maven build output.
 	$(MVNW) $(MAVEN_FLAGS) clean
 
 unit-test: ## Run fast unit tests only.
-	$(MVNW) $(MAVEN_FLAGS) test -DskipIntegrationTests=true
+	$(MVNW) $(MAVEN_FLAGS) clean test -DskipIntegrationTests=true
 
 integration-test: ## Run PostgreSQL/Kafka Testcontainers integration tests only.
-	$(MVNW) $(MAVEN_FLAGS) verify -DskipUnitTests=true -Djacoco.skip=true
+	$(MVNW) $(MAVEN_FLAGS) clean verify -DskipUnitTests=true -Djacoco.skip=true
 
 test: ## Run all unit and integration tests.
 	$(MVNW) $(MAVEN_FLAGS) clean verify
