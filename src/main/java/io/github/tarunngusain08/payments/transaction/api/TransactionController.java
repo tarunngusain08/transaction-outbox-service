@@ -48,7 +48,7 @@ public class TransactionController {
     }
 
     @PostMapping("/normalize")
-    public TransactionResponse normalize(
+    public CreateTransactionRequest normalize(
             @Valid @RequestBody LegacyTransactionRequest request
     ) {
         return transactionNormalizer.normalize(request);

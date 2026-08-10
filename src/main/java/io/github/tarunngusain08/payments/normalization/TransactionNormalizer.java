@@ -1,26 +1,30 @@
 package io.github.tarunngusain08.payments.normalization;
 
 import io.github.tarunngusain08.payments.normalization.api.LegacyTransactionRequest;
+import io.github.tarunngusain08.payments.transaction.InvalidTransactionException;
 import io.github.tarunngusain08.payments.transaction.PaymentChannel;
 import io.github.tarunngusain08.payments.transaction.TransactionContract;
-import io.github.tarunngusain08.payments.transaction.TransactionStatus;
 import io.github.tarunngusain08.payments.transaction.TransactionType;
-import io.github.tarunngusain08.payments.transaction.api.TransactionResponse;
+import io.github.tarunngusain08.payments.transaction.api.CreateTransactionRequest;
 import io.github.tarunngusain08.payments.validation.CurrencySupport;
+import io.github.tarunngusain08.payments.validation.MetadataCanonicalizer;
+import jakarta.validation.Validator;
 import org.springframework.stereotype.Service;
 
 import java.math.BigDecimal;
 import java.math.RoundingMode;
+import java.time.Clock;
 import java.time.DateTimeException;
+import java.time.Instant;
 import java.time.LocalDateTime;
 import java.time.ZoneId;
 import java.time.format.DateTimeFormatter;
 import java.time.format.ResolverStyle;
-import java.util.Currency;
+import java.util.Comparator;
 import java.util.LinkedHashMap;
 import java.util.Locale;
 import java.util.Map;
-import java.util.UUID;
+import java.util.regex.Pattern;
 
 @Service
 public class TransactionNormalizer {
@@ -29,55 +33,71 @@ public class TransactionNormalizer {
     static final DateTimeFormatter SOURCE_DATE_FORMAT = DateTimeFormatter
             .ofPattern("dd-MM-uuuu HH:mm:ss", Locale.ROOT)
             .withResolverStyle(ResolverStyle.STRICT);
+    private static final Pattern ORDINARY_DECIMAL =
+            Pattern.compile("^[0-9]+(?:\\.[0-9]+)?$");
+    private final MetadataCanonicalizer metadataCanonicalizer;
+    private final Validator validator;
+    private final Clock clock;
 
-    public TransactionResponse normalize(LegacyTransactionRequest source) {
-        String currency = source.currency().trim().toUpperCase(Locale.ROOT);
+    public TransactionNormalizer(
+            MetadataCanonicalizer metadataCanonicalizer,
+            Validator validator,
+            Clock clock
+    ) {
+        this.metadataCanonicalizer = metadataCanonicalizer;
+        this.validator = validator;
+        this.clock = clock;
+    }
+
+    public CreateTransactionRequest normalize(LegacyTransactionRequest source) {
+        String currency = canonicalCurrency(source.currency());
         var channel = toChannel(source.mode());
         var createdAt = toInstant(source.transactionDate());
+        Map<String, Object> metadata;
+        try {
+            metadata = metadataCanonicalizer.canonicalize(metadata(source, channel));
+        } catch (InvalidTransactionException exception) {
+            throw new NormalizationException(exception.getMessage(), exception);
+        }
 
-        return new TransactionResponse(
-                UUID.randomUUID(),
+        var normalized = new CreateTransactionRequest(
                 TransactionContract.LEGACY_BANK_FEED_SOURCE,
                 source.transactionReference().trim(),
                 toMinorUnits(source.transactionAmount(), currency),
                 currency,
                 toTransactionType(source.transactionType()),
-                TransactionStatus.PENDING,
                 source.payer().accountNumber().trim(),
                 source.payee().accountNumber().trim(),
                 channel,
                 createdAt,
-                createdAt,
-                metadata(source, channel)
+                metadata
         );
+        validateCanonicalOutput(normalized);
+        return normalized;
     }
 
     long toMinorUnits(String rawAmount, String currencyCode) {
-        final Currency currency;
-        try {
-            currency = CurrencySupport.resolve(currencyCode);
-        } catch (IllegalArgumentException exception) {
-            throw new NormalizationException("Unsupported ccy: " + currencyCode, exception);
+        String currency = canonicalCurrency(currencyCode);
+        if (rawAmount == null || !ORDINARY_DECIMAL.matcher(rawAmount).matches()) {
+            throw new NormalizationException(
+                    "txn_amount must be a positive plain-decimal INR amount"
+            );
         }
 
         try {
-            int fractionDigits = currency.getDefaultFractionDigits();
-            if (fractionDigits < 0) {
-                throw new NormalizationException("Currency does not define minor units: " + currencyCode);
-            }
-
-            var amount = new BigDecimal(rawAmount.trim());
+            var amount = new BigDecimal(rawAmount);
             if (amount.signum() <= 0) {
                 throw new NormalizationException("txn_amount must be greater than zero");
             }
 
             return amount
-                    .setScale(fractionDigits, RoundingMode.UNNECESSARY)
-                    .movePointRight(fractionDigits)
+                    .setScale(TransactionContract.INR_MINOR_UNIT_EXPONENT, RoundingMode.UNNECESSARY)
+                    .movePointRight(TransactionContract.INR_MINOR_UNIT_EXPONENT)
                     .longValueExact();
         } catch (NumberFormatException | ArithmeticException exception) {
             throw new NormalizationException(
-                    "txn_amount must be a valid %s amount with no fractional minor units".formatted(currencyCode),
+                    "txn_amount must be an exact %s amount with no fractional paise"
+                            .formatted(currency),
                     exception
             );
         }
@@ -104,7 +124,7 @@ public class TransactionNormalizer {
         };
     }
 
-    private java.time.Instant toInstant(String rawDate) {
+    private Instant toInstant(String rawDate) {
         try {
             return LocalDateTime.parse(rawDate.trim(), SOURCE_DATE_FORMAT)
                     .atZone(SOURCE_TIME_ZONE)
@@ -134,5 +154,33 @@ public class TransactionNormalizer {
             metadata.put("originalMode", source.mode().trim());
         }
         return Map.copyOf(metadata);
+    }
+
+    private String canonicalCurrency(String rawCurrency) {
+        try {
+            return CurrencySupport.canonicalizeLegacy(rawCurrency);
+        } catch (IllegalArgumentException exception) {
+            throw new NormalizationException("Unsupported ccy: " + rawCurrency, exception);
+        }
+    }
+
+    private void validateCanonicalOutput(CreateTransactionRequest normalized) {
+        validator.validate(normalized).stream()
+                .min(Comparator.comparing(violation -> violation.getPropertyPath().toString()))
+                .ifPresent(violation -> {
+                    throw new NormalizationException(
+                            "normalized " + violation.getPropertyPath() + " "
+                                    + violation.getMessage()
+                    );
+                });
+
+        try {
+            TransactionContract.validateCreatedAt(
+                    normalized.createdAt(),
+                    TransactionContract.canonicalTimestamp(Instant.now(clock))
+            );
+        } catch (InvalidTransactionException exception) {
+            throw new NormalizationException(exception.getMessage(), exception);
+        }
     }
 }

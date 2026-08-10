@@ -5,6 +5,7 @@ import io.github.tarunngusain08.payments.outbox.OutboxStatus;
 import io.github.tarunngusain08.payments.transaction.PaymentTransactionRepository;
 import io.github.tarunngusain08.payments.transaction.TransactionCreatedEvent;
 import io.github.tarunngusain08.payments.transaction.TransactionEventSerializer;
+import io.github.tarunngusain08.payments.transaction.api.CreateTransactionRequest;
 import io.github.tarunngusain08.payments.transaction.api.TransactionResponse;
 import org.apache.kafka.clients.consumer.ConsumerConfig;
 import org.apache.kafka.clients.consumer.KafkaConsumer;
@@ -275,16 +276,26 @@ class TransactionPipelineIT {
     }
 
     @Test
-    void normalizesLegacyPayloadWithoutPersistingIt() throws Exception {
+    void normalizesLegacyPayloadAndSubmitsTheResponseUnchangedToCreate() throws Exception {
         var response = post("/api/v1/transactions/normalize", legacyRequest());
 
         assertThat(response.statusCode()).isEqualTo(HttpStatus.OK.value());
-        var normalized = objectMapper.readValue(response.body(), TransactionResponse.class);
+        var normalized = objectMapper.readValue(response.body(), CreateTransactionRequest.class);
+        assertThat(normalized.sourceSystem()).isEqualTo("LEGACY_BANK_FEED");
         assertThat(normalized.amount()).isEqualTo(150_000L);
         assertThat(normalized.createdAt()).isEqualTo(Instant.parse("2026-08-08T09:02:11Z"));
         assertThat(normalized.metadata()).containsEntry("payerIfsc", "HDFC0001234");
-        assertThat(transactionRepository.count()).isZero();
-        assertThat(outboxRepository.count()).isZero();
+
+        var created = post("/api/v1/transactions", response.body());
+        assertThat(created.statusCode()).isEqualTo(HttpStatus.CREATED.value());
+        var transaction = objectMapper.readValue(created.body(), TransactionResponse.class);
+        assertThat(transaction.sourceSystem()).isEqualTo(normalized.sourceSystem());
+        assertThat(transaction.externalReference()).isEqualTo(normalized.externalReference());
+        assertThat(transaction.amount()).isEqualTo(normalized.amount());
+        assertThat(transaction.createdAt()).isEqualTo(normalized.createdAt());
+        assertThat(transaction.metadata()).isEqualTo(normalized.metadata());
+        assertThat(transactionRepository.count()).isEqualTo(1);
+        assertThat(outboxRepository.count()).isEqualTo(1);
     }
 
     @Test

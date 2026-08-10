@@ -1,6 +1,5 @@
 package io.github.tarunngusain08.payments.validation;
 
-import java.util.Currency;
 import java.util.Locale;
 
 import static io.github.tarunngusain08.payments.transaction.TransactionContract.INR;
@@ -8,10 +7,6 @@ import static io.github.tarunngusain08.payments.transaction.TransactionContract.
 public final class CurrencySupport {
 
     private CurrencySupport() {
-    }
-
-    public static Currency resolve(String rawCode) {
-        return Currency.getInstance(canonicalizeLegacy(rawCode));
     }
 
     public static String canonicalizeLegacy(String rawCode) {

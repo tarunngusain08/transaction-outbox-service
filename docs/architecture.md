@@ -66,15 +66,17 @@ is why `eventId` deduplication remains mandatory.
 ## Normalization boundary
 
 The normalization endpoint is side-effect-free: it neither writes to the
-database nor emits an event. It is not deterministic because each response gets
-a new UUID. Its output is the same canonical shape accepted by the create
-endpoint. It:
+database nor emits an event. It is deterministic and omits server-owned ID,
+status, and receipt time. Its output is the exact request shape accepted by the
+create endpoint and can be submitted unchanged. It:
 
-- converts a decimal major-unit string to exact ISO-currency minor units;
+- converts positive plain-decimal INR rupees to exact integer paise without
+  rounding or exponent notation;
 - maps `DR`/`CR` into canonical enums;
 - treats the source timestamp as `Asia/Kolkata` and returns an ISO-8601 instant;
 - flattens payer/payee accounts; and
-- preserves source-only fields in `metadata`.
+- preserves source-only fields in canonicalized `metadata`; and
+- applies the same identifier, metadata, and timestamp-domain rules as create.
 
 ## Verification strategy
 

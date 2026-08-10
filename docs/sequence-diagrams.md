@@ -142,13 +142,15 @@ sequenceDiagram
         Normalizer->>Normalizer: Map DR/CR and payment channel
         Normalizer->>Normalizer: Convert Asia/Kolkata source time to Instant
         Normalizer->>Normalizer: Flatten accounts and preserve source metadata
-        alt Amount, type, or date is semantically invalid
+        Normalizer->>Normalizer: Validate exact create-compatible request
+        alt Amount, type, date, identifier, timestamp, or metadata is invalid
             Normalizer->>Handler: NormalizationException
             Handler-->>Client: 422 ProblemDetail
         else Normalization succeeds
-            Normalizer-->>Controller: Canonical TransactionResponse
-            Controller-->>Client: 200 OK
+            Normalizer-->>Controller: Deterministic CreateTransactionRequest
+            Controller-->>Client: 200 OK with no server-owned fields
             Note over Client,Normalizer: Unknown channel maps to OTHER and original mode is metadata
+            Note over Client,Normalizer: Response can be POSTed unchanged to create
             Note over Client,Normalizer: No PostgreSQL write and no Kafka publish occur
         end
     end
