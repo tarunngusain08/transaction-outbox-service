@@ -6,6 +6,7 @@ import jakarta.persistence.EnumType;
 import jakarta.persistence.Enumerated;
 import jakarta.persistence.Id;
 import jakarta.persistence.Table;
+import jakarta.persistence.UniqueConstraint;
 import org.hibernate.annotations.JdbcTypeCode;
 import org.hibernate.type.SqlTypes;
 
@@ -16,13 +17,22 @@ import java.util.Map;
 import java.util.UUID;
 
 @Entity
-@Table(name = "transactions")
+@Table(
+        name = "transactions",
+        uniqueConstraints = @UniqueConstraint(
+                name = "uk_transactions_source_reference",
+                columnNames = {"source_system", "external_reference"}
+        )
+)
 public class PaymentTransaction {
 
     @Id
     private UUID id;
 
-    @Column(name = "external_reference", nullable = false, unique = true, length = 100)
+    @Column(name = "source_system", nullable = false, length = 32)
+    private String sourceSystem;
+
+    @Column(name = "external_reference", nullable = false, length = 100)
     private String externalReference;
 
     @Column(name = "amount_minor", nullable = false)
@@ -52,6 +62,15 @@ public class PaymentTransaction {
     @Column(name = "created_at", nullable = false, updatable = false)
     private Instant createdAt;
 
+    @Column(name = "received_at", nullable = false, updatable = false)
+    private Instant receivedAt;
+
+    @Column(name = "request_fingerprint", length = 64)
+    private String requestFingerprint;
+
+    @Column(name = "request_fingerprint_version")
+    private Short requestFingerprintVersion;
+
     @JdbcTypeCode(SqlTypes.JSON)
     @Column(nullable = false, columnDefinition = "jsonb")
     private Map<String, Object> metadata = new LinkedHashMap<>();
@@ -61,6 +80,7 @@ public class PaymentTransaction {
 
     public PaymentTransaction(
             UUID id,
+            String sourceSystem,
             String externalReference,
             long amountMinor,
             String currency,
@@ -70,9 +90,13 @@ public class PaymentTransaction {
             String destinationAccount,
             PaymentChannel channel,
             Instant createdAt,
-            Map<String, Object> metadata
+            Instant receivedAt,
+            Map<String, Object> metadata,
+            String requestFingerprint,
+            Short requestFingerprintVersion
     ) {
         this.id = id;
+        this.sourceSystem = sourceSystem;
         this.externalReference = externalReference;
         this.amountMinor = amountMinor;
         this.currency = currency;
@@ -82,11 +106,18 @@ public class PaymentTransaction {
         this.destinationAccount = destinationAccount;
         this.channel = channel;
         this.createdAt = createdAt;
+        this.receivedAt = receivedAt;
         this.metadata = metadata == null ? new LinkedHashMap<>() : new LinkedHashMap<>(metadata);
+        this.requestFingerprint = requestFingerprint;
+        this.requestFingerprintVersion = requestFingerprintVersion;
     }
 
     public UUID getId() {
         return id;
+    }
+
+    public String getSourceSystem() {
+        return sourceSystem;
     }
 
     public String getExternalReference() {
@@ -123,6 +154,18 @@ public class PaymentTransaction {
 
     public Instant getCreatedAt() {
         return createdAt;
+    }
+
+    public Instant getReceivedAt() {
+        return receivedAt;
+    }
+
+    public String getRequestFingerprint() {
+        return requestFingerprint;
+    }
+
+    public Short getRequestFingerprintVersion() {
+        return requestFingerprintVersion;
     }
 
     public Map<String, Object> getMetadata() {

@@ -110,9 +110,14 @@ class TransactionPipelineIT {
 
         assertThat(response.statusCode()).isEqualTo(HttpStatus.CREATED.value());
         var transaction = objectMapper.readValue(response.body(), TransactionResponse.class);
+        assertThat(transaction.sourceSystem()).isEqualTo("DIRECT_API");
         assertThat(transaction.externalReference()).isEqualTo(externalReference);
         assertThat(transaction.amount()).isEqualTo(150_000L);
-        assertThat(transactionRepository.findByExternalReference(externalReference)).isPresent();
+        assertThat(transaction.receivedAt()).isNotNull();
+        assertThat(transactionRepository.findBySourceSystemAndExternalReference(
+                "DIRECT_API",
+                externalReference
+        )).isPresent();
 
         await().atMost(Duration.ofSeconds(15)).untilAsserted(() -> {
             var outboxEvents = outboxRepository.findAll();
@@ -162,6 +167,20 @@ class TransactionPipelineIT {
     }
 
     @Test
+    void scopesExternalReferenceIdentityBySourceSystem() throws Exception {
+        String externalReference = "IT-NAMESPACE-" + UUID.randomUUID();
+        String directRequest = canonicalRequest("DIRECT_API", externalReference);
+        String partnerRequest = canonicalRequest("PARTNER_BANK", externalReference);
+
+        assertThat(post("/api/v1/transactions", directRequest).statusCode())
+                .isEqualTo(HttpStatus.CREATED.value());
+        assertThat(post("/api/v1/transactions", partnerRequest).statusCode())
+                .isEqualTo(HttpStatus.CREATED.value());
+        assertThat(transactionRepository.count()).isEqualTo(2);
+        assertThat(outboxRepository.count()).isEqualTo(2);
+    }
+
+    @Test
     void normalizesLegacyPayloadWithoutPersistingIt() throws Exception {
         var response = post("/api/v1/transactions/normalize", legacyRequest());
 
@@ -191,34 +210,30 @@ class TransactionPipelineIT {
     }
 
     @Test
-    void rejectsUuidCollisionWithoutChangingTheOriginalTransaction() throws Exception {
-        UUID transactionId = UUID.randomUUID();
-        String originalReference = "IT-ID-ORIGINAL-" + UUID.randomUUID();
-        String conflictingReference = "IT-ID-CONFLICT-" + UUID.randomUUID();
-
-        assertThat(post(
-                "/api/v1/transactions",
-                canonicalRequest(transactionId, originalReference, 150_000L, "INR", "DEBIT")
-        ).statusCode()).isEqualTo(HttpStatus.CREATED.value());
-
-        await().atMost(Duration.ofSeconds(15)).untilAsserted(() ->
-                assertThat(outboxRepository.findAll())
-                        .singleElement()
-                        .extracting(event -> event.getStatus())
-                        .isEqualTo(OutboxStatus.PUBLISHED));
-
-        var collision = post(
-                "/api/v1/transactions",
-                canonicalRequest(transactionId, conflictingReference, 999L, "INR", "CREDIT")
+    void rejectsCallerOwnedServerFieldsWithoutDurableWrites() throws Exception {
+        String base = canonicalRequest("IT-OWNERSHIP-" + UUID.randomUUID());
+        List<String> invalidRequests = List.of(
+                base.replace(
+                        "\"externalReference\"",
+                        "\"transactionId\": \"%s\", \"externalReference\""
+                                .formatted(UUID.randomUUID())
+                ),
+                base.replace(
+                        "\"externalReference\"",
+                        "\"status\": \"SUCCESS\", \"externalReference\""
+                ),
+                base.replace(
+                        "\"externalReference\"",
+                        "\"receivedAt\": \"2026-08-08T10:15:30Z\", \"externalReference\""
+                )
         );
 
-        assertThat(collision.statusCode()).isEqualTo(HttpStatus.CONFLICT.value());
-        var stored = transactionRepository.findById(transactionId).orElseThrow();
-        assertThat(stored.getExternalReference()).isEqualTo(originalReference);
-        assertThat(stored.getAmountMinor()).isEqualTo(150_000L);
-        assertThat(stored.getCurrency()).isEqualTo("INR");
-        assertThat(stored.getType().name()).isEqualTo("DEBIT");
-        assertThat(outboxRepository.count()).isEqualTo(1);
+        for (String request : invalidRequests) {
+            assertThat(post("/api/v1/transactions", request).statusCode())
+                    .isEqualTo(HttpStatus.BAD_REQUEST.value());
+        }
+        assertThat(transactionRepository.count()).isZero();
+        assertThat(outboxRepository.count()).isZero();
     }
 
     @Test
@@ -231,9 +246,16 @@ class TransactionPipelineIT {
                 canonicalRequest(referencePrefix + "-OVERFLOW")
                         .replace("150000", "9223372036854775808"),
                 canonicalRequest(referencePrefix + "-ENUM").replace("\"DEBIT\"", "0"),
+                canonicalRequest(referencePrefix + "-DUPLICATE").replace(
+                        "\"amount\": 150000",
+                        "\"amount\": 1, \"amount\": 150000"
+                ),
                 canonicalRequest(referencePrefix + "-UNKNOWN")
                         .replace("\"metadata\"", "\"statuz\": \"SUCCESS\", \"metadata\""),
                 canonicalRequest(referencePrefix + "-CURRENCY").replace("\"INR\"", "\"XYZ\""),
+                canonicalRequest(referencePrefix + "-SOURCE")
+                        .replace("\"DIRECT_API\"", "\"direct_api\""),
+                canonicalRequest("\u00a0" + referencePrefix + "-UNICODE"),
                 canonicalRequest(referencePrefix + "-TIME").replace(
                         "\"metadata\"",
                         "\"createdAt\": \"+300000-01-01T00:00:00Z\", \"metadata\""
@@ -245,6 +267,14 @@ class TransactionPipelineIT {
                 canonicalRequest(referencePrefix + "-DOMAIN-METADATA").replace(
                         "\"integration\"",
                         "\"" + "x".repeat(1_100) + "\""
+                ),
+                canonicalRequest(referencePrefix + "-METADATA-DECIMAL").replace(
+                        "{\"testRun\": \"integration\"}",
+                        "{\"fraction\": 1.0}"
+                ),
+                canonicalRequest(referencePrefix + "-METADATA-EXPONENT").replace(
+                        "{\"testRun\": \"integration\"}",
+                        "{\"count\": 1e2}"
                 )
         );
 
@@ -271,20 +301,44 @@ class TransactionPipelineIT {
     }
 
     @Test
-    void canonicalizesExternalReferenceBeforeDuplicateDetectionAndPersistence() throws Exception {
+    void rejectsNonCanonicalIdentifiersBeforePersistence() throws Exception {
         String canonicalReference = "IT-SPACE-" + UUID.randomUUID();
 
-        var created = post("/api/v1/transactions", canonicalRequest("  " + canonicalReference + "  "));
-        assertThat(created.statusCode()).isEqualTo(HttpStatus.CREATED.value());
-        var body = objectMapper.readValue(created.body(), TransactionResponse.class);
-        assertThat(body.externalReference()).isEqualTo(canonicalReference);
+        assertThat(post(
+                "/api/v1/transactions",
+                canonicalRequest("  " + canonicalReference + "  ")
+        ).statusCode()).isEqualTo(HttpStatus.BAD_REQUEST.value());
+        assertThat(post(
+                "/api/v1/transactions",
+                canonicalRequest(canonicalReference).replace("1234567890", " account ")
+        ).statusCode()).isEqualTo(HttpStatus.BAD_REQUEST.value());
+        assertThat(transactionRepository.count()).isZero();
+        assertThat(outboxRepository.count()).isZero();
+    }
 
-        var replay = post("/api/v1/transactions", canonicalRequest(canonicalReference));
+    @Test
+    void canonicalizesTimestampToDatabasePrecisionForCreateReplayAndRead() throws Exception {
+        String externalReference = "IT-PRECISION-" + UUID.randomUUID();
+        String request = canonicalRequest(externalReference).replace(
+                "\"metadata\"",
+                "\"createdAt\": \"2026-08-08T09:02:11.123456789Z\", \"metadata\""
+        );
+
+        var created = post("/api/v1/transactions", request);
+        assertThat(created.statusCode()).isEqualTo(HttpStatus.CREATED.value());
+        var createdBody = objectMapper.readValue(created.body(), TransactionResponse.class);
+        assertThat(createdBody.createdAt())
+                .isEqualTo(Instant.parse("2026-08-08T09:02:11.123456Z"));
+
+        var replay = post("/api/v1/transactions", request);
         assertThat(replay.statusCode()).isEqualTo(HttpStatus.OK.value());
-        assertThat(objectMapper.readValue(replay.body(), TransactionResponse.class).transactionId())
-                .isEqualTo(body.transactionId());
-        assertThat(transactionRepository.count()).isEqualTo(1);
-        assertThat(outboxRepository.count()).isEqualTo(1);
+        var replayBody = objectMapper.readValue(replay.body(), TransactionResponse.class);
+        assertThat(replayBody).isEqualTo(createdBody);
+
+        var read = get("/api/v1/transactions/" + createdBody.transactionId());
+        assertThat(read.statusCode()).isEqualTo(HttpStatus.OK.value());
+        assertThat(objectMapper.readValue(read.body(), TransactionResponse.class))
+                .isEqualTo(createdBody);
     }
 
     private HttpResponse<String> post(String path, String body) throws Exception {
@@ -329,8 +383,13 @@ class TransactionPipelineIT {
     }
 
     private String canonicalRequest(String externalReference) {
+        return canonicalRequest("DIRECT_API", externalReference);
+    }
+
+    private String canonicalRequest(String sourceSystem, String externalReference) {
         return """
                 {
+                  "sourceSystem": "%s",
                   "externalReference": "%s",
                   "amount": 150000,
                   "currency": "INR",
@@ -340,34 +399,13 @@ class TransactionPipelineIT {
                   "channel": "UPI",
                   "metadata": {"testRun": "integration"}
                 }
-                """.formatted(externalReference);
-    }
-
-    private String canonicalRequest(
-            UUID transactionId,
-            String externalReference,
-            long amount,
-            String currency,
-            String type
-    ) {
-        return """
-                {
-                  "transactionId": "%s",
-                  "externalReference": "%s",
-                  "amount": %d,
-                  "currency": "%s",
-                  "type": "%s",
-                  "sourceAccount": "1234567890",
-                  "destinationAccount": "9876543210",
-                  "channel": "UPI",
-                  "metadata": {"testRun": "integration"}
-                }
-                """.formatted(transactionId, externalReference, amount, currency, type);
+                """.formatted(sourceSystem, externalReference);
     }
 
     private String invalidCanonicalRequest() {
         return """
                 {
+                  "sourceSystem": "DIRECT_API",
                   "externalReference": "IT-INVALID",
                   "amount": 0,
                   "currency": "INR",

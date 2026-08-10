@@ -97,17 +97,18 @@ curl -i -X POST http://localhost:8080/api/v1/transactions \
 ```
 
 The first accepted request returns `201 Created`, the canonical transaction, and
-a `Location` header. `transactionId`, `status`, and `createdAt` are optional
-source-owned ingestion fields; they default to a new UUID, `PENDING`, and the
-current UTC time. An identical replay of the same trimmed `externalReference`
-returns the original record with `200 OK`; a conflicting replay returns
-`409 Conflict`. This prototype intentionally uses one global upstream-reference
-namespace.
+a `Location` header. `sourceSystem` is required. `transactionId`, `status`, and
+`receivedAt` are server-owned; creation generates a UUID, starts in `PENDING`,
+and records the current UTC receipt time. Optional source-owned `createdAt`
+defaults to `receivedAt`. An identical replay of the same case-sensitive
+`(sourceSystem, externalReference)` returns the original record with `200 OK`;
+a conflicting replay returns `409 Conflict`.
 
-Canonical JSON is strict: unknown fields, numeric enum ordinals, numeric strings,
-fractional/exponent representations for minor units, unsupported currencies,
-unreasonable timestamps, and over-budget metadata are rejected instead of
-coerced or silently ignored.
+Canonical JSON is strict: duplicate or unknown fields, numeric enum ordinals,
+numeric strings, fractional/exponent representations for minor units,
+non-`INR` currencies, non-canonical ASCII identifiers, unreasonable timestamps,
+metadata decimals/exponents, and over-budget metadata are rejected instead of
+coerced or silently ignored. Metadata numbers are signed 64-bit integers.
 
 Fetch the stored record:
 

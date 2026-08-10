@@ -7,7 +7,10 @@ import java.util.UUID;
 
 public interface PaymentTransactionRepository extends JpaRepository<PaymentTransaction, UUID> {
 
-    Optional<PaymentTransaction> findByExternalReference(String externalReference);
+    Optional<PaymentTransaction> findBySourceSystemAndExternalReference(
+            String sourceSystem,
+            String externalReference
+    );
 
-    boolean existsByExternalReference(String externalReference);
+    boolean existsBySourceSystemAndExternalReference(String sourceSystem, String externalReference);
 }

@@ -5,6 +5,7 @@ import org.springframework.boot.jackson.autoconfigure.JsonMapperBuilderCustomize
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import tools.jackson.core.StreamReadConstraints;
+import tools.jackson.core.StreamReadFeature;
 import tools.jackson.databind.cfg.CoercionAction;
 import tools.jackson.databind.cfg.CoercionInputShape;
 import tools.jackson.databind.type.LogicalType;
@@ -22,13 +23,15 @@ public class JsonConfiguration {
 
     @Bean
     JsonFactoryBuilderCustomizer boundedJsonInput() {
-        return builder -> builder.streamReadConstraints(StreamReadConstraints.builder()
-                .maxNestingDepth(16)
-                .maxDocumentLength(65_536)
-                .maxTokenCount(1_000)
-                .maxNumberLength(64)
-                .maxStringLength(16_384)
-                .maxNameLength(128)
-                .build());
+        return builder -> builder
+                .enable(StreamReadFeature.STRICT_DUPLICATE_DETECTION)
+                .streamReadConstraints(StreamReadConstraints.builder()
+                        .maxNestingDepth(16)
+                        .maxDocumentLength(65_536)
+                        .maxTokenCount(1_000)
+                        .maxNumberLength(64)
+                        .maxStringLength(16_384)
+                        .maxNameLength(128)
+                        .build());
     }
 }

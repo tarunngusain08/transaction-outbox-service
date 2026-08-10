@@ -114,7 +114,7 @@ CREATE TRIGGER trg_reference_audit_immutable
 ALTER TABLE transactions
     ADD COLUMN source_system VARCHAR(32) NOT NULL DEFAULT 'DIRECT_API',
     ADD COLUMN received_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    ADD COLUMN request_fingerprint CHAR(64),
+    ADD COLUMN request_fingerprint VARCHAR(64),
     ADD COLUMN request_fingerprint_version SMALLINT;
 
 ALTER TABLE transactions

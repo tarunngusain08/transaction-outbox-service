@@ -18,14 +18,14 @@ public record LegacyTransactionRequest(
         @NotBlank
         @Size(max = 32)
         @Pattern(
-                regexp = "^[+-]?[0-9]+(?:\\.[0-9]+)?$",
+                regexp = "^[0-9]+(?:\\.[0-9]+)?$",
                 message = "must use ordinary decimal notation"
         )
         String transactionAmount,
 
         @JsonProperty("ccy")
         @NotBlank
-        @Pattern(regexp = "^[A-Za-z]{3}$", message = "must be a three-letter ISO currency code")
+        @Pattern(regexp = "(?i)^INR$", message = "version 1 supports only INR")
         @SupportedCurrency
         String currency,
 

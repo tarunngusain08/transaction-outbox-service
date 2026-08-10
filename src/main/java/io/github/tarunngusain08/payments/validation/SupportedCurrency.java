@@ -19,7 +19,7 @@ import static java.lang.annotation.RetentionPolicy.RUNTIME;
 @Retention(RUNTIME)
 public @interface SupportedCurrency {
 
-    String message() default "must be a recognized ISO 4217 currency code";
+    String message() default "version 1 supports only INR";
 
     Class<?>[] groups() default {};
 

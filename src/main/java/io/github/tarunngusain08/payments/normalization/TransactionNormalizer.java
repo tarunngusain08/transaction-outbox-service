@@ -2,6 +2,7 @@ package io.github.tarunngusain08.payments.normalization;
 
 import io.github.tarunngusain08.payments.normalization.api.LegacyTransactionRequest;
 import io.github.tarunngusain08.payments.transaction.PaymentChannel;
+import io.github.tarunngusain08.payments.transaction.TransactionContract;
 import io.github.tarunngusain08.payments.transaction.TransactionStatus;
 import io.github.tarunngusain08.payments.transaction.TransactionType;
 import io.github.tarunngusain08.payments.transaction.api.TransactionResponse;
@@ -32,9 +33,11 @@ public class TransactionNormalizer {
     public TransactionResponse normalize(LegacyTransactionRequest source) {
         String currency = source.currency().trim().toUpperCase(Locale.ROOT);
         var channel = toChannel(source.mode());
+        var createdAt = toInstant(source.transactionDate());
 
         return new TransactionResponse(
                 UUID.randomUUID(),
+                TransactionContract.LEGACY_BANK_FEED_SOURCE,
                 source.transactionReference().trim(),
                 toMinorUnits(source.transactionAmount(), currency),
                 currency,
@@ -43,7 +46,8 @@ public class TransactionNormalizer {
                 source.payer().accountNumber().trim(),
                 source.payee().accountNumber().trim(),
                 channel,
-                toInstant(source.transactionDate()),
+                createdAt,
+                createdAt,
                 metadata(source, channel)
         );
     }
@@ -104,7 +108,8 @@ public class TransactionNormalizer {
         try {
             return LocalDateTime.parse(rawDate.trim(), SOURCE_DATE_FORMAT)
                     .atZone(SOURCE_TIME_ZONE)
-                    .toInstant();
+                    .toInstant()
+                    .truncatedTo(java.time.temporal.ChronoUnit.MICROS);
         } catch (DateTimeException exception) {
             throw new NormalizationException(
                     "txn_date must use dd-MM-yyyy HH:mm:ss and represent a valid date",

@@ -11,6 +11,7 @@ import java.util.UUID;
 
 public record TransactionResponse(
         UUID transactionId,
+        String sourceSystem,
         String externalReference,
         long amount,
         String currency,
@@ -20,11 +21,13 @@ public record TransactionResponse(
         String destinationAccount,
         PaymentChannel channel,
         Instant createdAt,
+        Instant receivedAt,
         Map<String, Object> metadata
 ) {
     public static TransactionResponse from(PaymentTransaction transaction) {
         return new TransactionResponse(
                 transaction.getId(),
+                transaction.getSourceSystem(),
                 transaction.getExternalReference(),
                 transaction.getAmountMinor(),
                 transaction.getCurrency(),
@@ -34,6 +37,7 @@ public record TransactionResponse(
                 transaction.getDestinationAccount(),
                 transaction.getChannel(),
                 transaction.getCreatedAt(),
+                transaction.getReceivedAt(),
                 transaction.getMetadata()
         );
     }

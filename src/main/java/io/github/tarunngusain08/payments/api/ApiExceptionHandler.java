@@ -25,7 +25,7 @@ public class ApiExceptionHandler {
     private static final Logger log = LoggerFactory.getLogger(ApiExceptionHandler.class);
     private static final Set<String> TRANSACTION_UNIQUE_CONSTRAINTS = Set.of(
             "transactions_pkey",
-            "uk_transactions_external_reference"
+            "uk_transactions_source_reference"
     );
 
     @ExceptionHandler(DuplicateTransactionException.class)

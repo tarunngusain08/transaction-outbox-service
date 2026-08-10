@@ -4,12 +4,14 @@ import io.github.tarunngusain08.payments.outbox.OutboxEvent;
 import io.github.tarunngusain08.payments.outbox.OutboxEventRepository;
 import io.github.tarunngusain08.payments.transaction.api.CreateTransactionRequest;
 import io.github.tarunngusain08.payments.transaction.api.TransactionResponse;
+import io.github.tarunngusain08.payments.validation.MetadataCanonicalizer;
+import jakarta.validation.Validator;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.time.Clock;
-import java.time.Duration;
 import java.time.Instant;
+import java.util.Comparator;
 import java.util.Map;
 import java.util.Objects;
 import java.util.UUID;
@@ -18,13 +20,12 @@ import java.util.UUID;
 public class TransactionService {
 
     private static final String AGGREGATE_TYPE = "TRANSACTION";
-    private static final Instant EARLIEST_CREATED_AT = Instant.parse("1970-01-01T00:00:00Z");
-    private static final Duration MAX_FUTURE_CLOCK_SKEW = Duration.ofMinutes(5);
-
     private final PaymentTransactionRepository transactionRepository;
     private final PaymentTransactionInserter transactionInserter;
     private final OutboxEventRepository outboxRepository;
     private final TransactionEventSerializer eventSerializer;
+    private final MetadataCanonicalizer metadataCanonicalizer;
+    private final Validator validator;
     private final Clock clock;
 
     public TransactionService(
@@ -32,41 +33,57 @@ public class TransactionService {
             PaymentTransactionInserter transactionInserter,
             OutboxEventRepository outboxRepository,
             TransactionEventSerializer eventSerializer,
+            MetadataCanonicalizer metadataCanonicalizer,
+            Validator validator,
             Clock clock
     ) {
         this.transactionRepository = transactionRepository;
         this.transactionInserter = transactionInserter;
         this.outboxRepository = outboxRepository;
         this.eventSerializer = eventSerializer;
+        this.metadataCanonicalizer = metadataCanonicalizer;
+        this.validator = validator;
         this.clock = clock;
     }
 
     @Transactional
     public TransactionCreationResult create(CreateTransactionRequest request) {
-        String externalReference = request.externalReference().trim();
-        var existing = transactionRepository.findByExternalReference(externalReference);
+        validateRequest(request);
+        Instant receivedAt = TransactionContract.canonicalTimestamp(Instant.now(clock));
+        Instant requestedCreatedAt = request.createdAt() == null
+                ? null
+                : TransactionContract.canonicalTimestamp(request.createdAt());
+        Instant createdAt = requestedCreatedAt == null ? receivedAt : requestedCreatedAt;
+        TransactionContract.validateCreatedAt(createdAt, receivedAt);
+        Map<String, Object> metadata = metadataCanonicalizer.canonicalize(request.metadata());
+
+        var existing = transactionRepository.findBySourceSystemAndExternalReference(
+                request.sourceSystem(),
+                request.externalReference()
+        );
         if (existing.isPresent()) {
-            if (matches(existing.get(), request)) {
+            if (matches(existing.get(), request, requestedCreatedAt, metadata)) {
                 return TransactionCreationResult.replayed(TransactionResponse.from(existing.get()));
             }
-            throw new DuplicateTransactionException(externalReference);
+            throw new DuplicateTransactionException(request.externalReference());
         }
 
-        Instant now = Instant.now(clock);
-        Instant createdAt = request.createdAt() == null ? now : request.createdAt();
-        validateCreatedAt(createdAt, now);
         var transaction = new PaymentTransaction(
-                request.transactionId() == null ? UUID.randomUUID() : request.transactionId(),
-                externalReference,
+                UUID.randomUUID(),
+                request.sourceSystem(),
+                request.externalReference(),
                 request.amount(),
                 request.currency(),
                 request.type(),
-                request.status() == null ? TransactionStatus.PENDING : request.status(),
-                request.sourceAccount().trim(),
-                request.destinationAccount().trim(),
+                TransactionStatus.PENDING,
+                request.sourceAccount(),
+                request.destinationAccount(),
                 request.channel(),
                 createdAt,
-                request.metadata() == null ? Map.of() : request.metadata()
+                receivedAt,
+                metadata,
+                null,
+                null
         );
 
         transactionInserter.insert(transaction);
@@ -77,7 +94,7 @@ public class TransactionService {
                 TransactionCreatedEvent.PRODUCER,
                 eventId,
                 TransactionCreatedEvent.EVENT_TYPE,
-                now,
+                receivedAt,
                 response
         );
 
@@ -87,7 +104,7 @@ public class TransactionService {
                 transaction.getId(),
                 TransactionCreatedEvent.EVENT_TYPE,
                 eventSerializer.serialize(event),
-                now
+                receivedAt
         ));
 
         return TransactionCreationResult.created(response);
@@ -100,28 +117,32 @@ public class TransactionService {
                 .orElseThrow(() -> new TransactionNotFoundException(transactionId));
     }
 
-    private void validateCreatedAt(Instant createdAt, Instant now) {
-        if (createdAt.isBefore(EARLIEST_CREATED_AT)
-                || createdAt.isAfter(now.plus(MAX_FUTURE_CLOCK_SKEW))) {
-            throw new InvalidTransactionException(
-                    "createdAt must be between 1970-01-01T00:00:00Z and five minutes in the future"
-            );
+    private void validateRequest(CreateTransactionRequest request) {
+        if (request == null) {
+            throw new InvalidTransactionException("request is required");
         }
+        validator.validate(request).stream()
+                .min(Comparator.comparing(violation -> violation.getPropertyPath().toString()))
+                .ifPresent(violation -> {
+                    throw new InvalidTransactionException(
+                            violation.getPropertyPath() + " " + violation.getMessage()
+                    );
+                });
     }
 
-    private boolean matches(PaymentTransaction existing, CreateTransactionRequest request) {
-        var expectedStatus = request.status() == null ? TransactionStatus.PENDING : request.status();
-        var expectedMetadata = request.metadata() == null ? Map.<String, Object>of() : request.metadata();
-
-        return (request.transactionId() == null || request.transactionId().equals(existing.getId()))
-                && request.amount() == existing.getAmountMinor()
+    private boolean matches(
+            PaymentTransaction existing,
+            CreateTransactionRequest request,
+            Instant requestedCreatedAt,
+            Map<String, Object> metadata
+    ) {
+        return request.amount() == existing.getAmountMinor()
                 && request.currency().equals(existing.getCurrency())
                 && request.type() == existing.getType()
-                && expectedStatus == existing.getStatus()
-                && request.sourceAccount().trim().equals(existing.getSourceAccount())
-                && request.destinationAccount().trim().equals(existing.getDestinationAccount())
+                && request.sourceAccount().equals(existing.getSourceAccount())
+                && request.destinationAccount().equals(existing.getDestinationAccount())
                 && request.channel() == existing.getChannel()
-                && (request.createdAt() == null || request.createdAt().equals(existing.getCreatedAt()))
-                && Objects.equals(expectedMetadata, existing.getMetadata());
+                && (requestedCreatedAt == null || requestedCreatedAt.equals(existing.getCreatedAt()))
+                && Objects.equals(metadata, existing.getMetadata());
     }
 }

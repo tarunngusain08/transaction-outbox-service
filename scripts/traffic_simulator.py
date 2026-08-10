@@ -49,6 +49,7 @@ class RequestResult:
 
 def canonical_payload(external_reference: str, amount: int = 150_000) -> dict[str, Any]:
     return {
+        "sourceSystem": "DIRECT_API",
         "externalReference": external_reference,
         "amount": amount,
         "currency": "INR",

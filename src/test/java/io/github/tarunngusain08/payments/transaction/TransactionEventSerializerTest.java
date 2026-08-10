@@ -22,6 +22,7 @@ class TransactionEventSerializerTest {
                 Instant.parse("2026-08-08T10:15:30Z"),
                 new TransactionResponse(
                         UUID.randomUUID(),
+                        "DIRECT_API",
                         "SOURCE-123",
                         100L,
                         "INR",
@@ -30,6 +31,7 @@ class TransactionEventSerializerTest {
                         "payer",
                         "payee",
                         PaymentChannel.UPI,
+                        Instant.parse("2026-08-08T10:15:30Z"),
                         Instant.parse("2026-08-08T10:15:30Z"),
                         Map.of()
                 )
