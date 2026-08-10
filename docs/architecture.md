@@ -32,36 +32,41 @@ is deliberately asynchronous and is not part of this atomic boundary.
 
 ## Delivery semantics
 
-The scheduled poller processes small batches in three phases:
+The scheduled poller processes at most `batchSize` events per run in three
+phases for each event:
 
-1. A short `REQUIRES_NEW` claim transaction selects due `PENDING` rows or
-   expired `PROCESSING` leases with `FOR UPDATE SKIP LOCKED`, assigns each a
-   unique claim token, changes status to `PROCESSING`, and commits.
+1. Immediately before one send, a short `REQUIRES_NEW` claim transaction selects
+   one due `PENDING` row or expired `PROCESSING` lease with
+   `FOR UPDATE SKIP LOCKED`, assigns a unique claim token, changes status to
+   `PROCESSING`, and commits. Later events are not pre-claimed.
 2. With no database transaction or row lock open, the worker publishes the
    stored JSON using the transaction ID as Kafka key and waits for acknowledgement.
    Kafka producer `max.block.ms` and the future wait both have explicit bounds.
 3. A short `REQUIRES_NEW` finalize transaction locks the one row, verifies the
-   claim token is still current, and records `PUBLISHED`, a scheduled retry, or
-   terminal `FAILED`.
+   claim token is still current, and records `PUBLISHED` or a scheduled retry.
 
 If Kafka accepts the record but the database update subsequently fails, the
 lease eventually expires and the event is retried. A consumer can also observe
 the Kafka record before the `PUBLISHED` database commit completes. Delivery is
 therefore **at least once**; consumers must use `eventId` as an idempotency key.
 
-Failures use exponential backoff (1, 2, 4, ... seconds, capped at five minutes).
-With the default eight-attempt budget, scheduled waits reach 64 seconds before
-the eighth failure becomes terminal. Larger retry budgets reach the five-minute
-formula cap. A `FAILED` row remains queryable for operator review.
+Ordinary failures increment `retry_count`, retain a bounded root error, and use
+exponential backoff (1, 2, 4, ... seconds, capped at five minutes) indefinitely.
+They never strand an event in a terminal application state. An interrupted
+sender preserves the thread interrupt and leaves its event `PROCESSING` without
+consuming a retry; lease expiry returns ownership to a worker. Migration V6
+recovers historical `FAILED` rows to due `PENDING` while preserving their retry
+count and last error, then prevents creation of new terminal rows.
 
 ## Concurrency
 
-`FOR UPDATE SKIP LOCKED` gives concurrent pollers disjoint claim batches without
-waiting on another poller's selected rows. A claim lease recovers work after a
-process exits between claim and finalize. Guarded claim-token checks stop a stale
-worker from finalizing a lease now owned by another worker. A lease expiring
-during a very slow but successful publish can still produce a duplicate, which
-is why `eventId` deduplication remains mandatory.
+`FOR UPDATE SKIP LOCKED` gives concurrent pollers disjoint individual claims
+without waiting. A claim lease recovers work after a process exits between claim
+and finalize. Guarded claim-token checks stop a stale worker from finalizing a
+lease now owned by another worker. Startup requires the lease to exceed Kafka
+producer `max.block.ms` plus the acknowledgement wait plus a safety margin. A
+lease can still expire after an unobservable broker acknowledgement or process
+pause, so `eventId` deduplication remains mandatory.
 
 ## Normalization boundary
 
@@ -74,7 +79,7 @@ create endpoint and can be submitted unchanged. It:
   rounding or exponent notation;
 - maps `DR`/`CR` into canonical enums;
 - treats the source timestamp as `Asia/Kolkata` and returns an ISO-8601 instant;
-- flattens payer/payee accounts; and
+- flattens payer/payee accounts;
 - preserves source-only fields in canonicalized `metadata`; and
 - applies the same identifier, metadata, and timestamp-domain rules as create.
 
@@ -93,7 +98,7 @@ single creation identity, and complete canonical body while allowing repeats of
 that same event identity. Configurable local throughput and p95 bounds make load
 mode a bounded acceptance scenario, not a capacity claim.
 
-`GET /actuator/outbox` reports pending, processing, and failed counts plus oldest
+`GET /actuator/outbox` reports pending and processing counts plus oldest
 unpublished age without changing ordinary `/actuator/health`. It enables a
 separate delivery alarm signal, but this repository does not configure an alert
 backend.
@@ -108,7 +113,8 @@ implemented yet.
 - UC-P01: authenticate and authorize API requests.
 - UC-P02: enforce deterministic request rate limits.
 - UC-P03: encrypt/tokenize account identifiers and redact sensitive logs.
-- UC-P04: add an auditable operator replay path for `FAILED` events.
+- UC-P04: add an authenticated, auditable way to expedite a persistently failing
+  event after an operator resolves its underlying dependency.
 - UC-P05: archive/partition old `PUBLISHED` rows under a retention policy.
 - UC-P06: export correlated telemetry and provide production SLO dashboards and
   alerts.

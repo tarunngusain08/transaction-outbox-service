@@ -12,22 +12,23 @@ class OutboxEventTest {
     private static final Instant CREATED_AT = Instant.parse("2026-08-08T10:15:30Z");
 
     @Test
-    void schedulesExponentialRetriesThenMovesToFailed() {
+    void schedulesExponentialRetriesWithoutCreatingTerminalFailure() {
         var event = pendingEvent();
 
-        event.recordFailure("broker unavailable", CREATED_AT, 3);
+        event.recordFailure("broker unavailable", CREATED_AT);
         assertThat(event.getStatus()).isEqualTo(OutboxStatus.PENDING);
         assertThat(event.getRetryCount()).isEqualTo(1);
         assertThat(event.getNextAttemptAt()).isEqualTo(CREATED_AT.plusSeconds(1));
 
-        event.recordFailure("broker unavailable", CREATED_AT.plusSeconds(1), 3);
+        event.recordFailure("broker unavailable", CREATED_AT.plusSeconds(1));
         assertThat(event.getStatus()).isEqualTo(OutboxStatus.PENDING);
         assertThat(event.getRetryCount()).isEqualTo(2);
         assertThat(event.getNextAttemptAt()).isEqualTo(CREATED_AT.plusSeconds(3));
 
-        event.recordFailure("broker unavailable", CREATED_AT.plusSeconds(3), 3);
-        assertThat(event.getStatus()).isEqualTo(OutboxStatus.FAILED);
+        event.recordFailure("broker unavailable", CREATED_AT.plusSeconds(3));
+        assertThat(event.getStatus()).isEqualTo(OutboxStatus.PENDING);
         assertThat(event.getRetryCount()).isEqualTo(3);
+        assertThat(event.getNextAttemptAt()).isEqualTo(CREATED_AT.plusSeconds(7));
         assertThat(event.getLastError()).isEqualTo("broker unavailable");
     }
 
@@ -51,7 +52,7 @@ class OutboxEventTest {
         var event = pendingEvent();
 
         for (int attempt = 1; attempt <= 10; attempt++) {
-            event.recordFailure("broker unavailable", CREATED_AT, 12);
+            event.recordFailure("broker unavailable", CREATED_AT);
         }
 
         assertThat(event.getStatus()).isEqualTo(OutboxStatus.PENDING);

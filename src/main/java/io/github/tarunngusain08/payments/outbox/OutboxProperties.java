@@ -14,15 +14,40 @@ public record OutboxProperties(
         @NotBlank String topic,
         @NotNull Duration pollDelay,
         @Min(1) int batchSize,
-        @Min(1) int maxRetries,
         @NotNull Duration publishTimeout,
-        @NotNull Duration claimLease
+        @NotNull Duration producerMaxBlock,
+        @NotNull Duration claimLease,
+        @NotNull Duration claimSafetyMargin
 ) {
     public OutboxProperties {
+        if (batchSize < 1) {
+            throw new IllegalArgumentException("batchSize must be at least one");
+        }
+        requirePositive("pollDelay", pollDelay);
+        requirePositive("publishTimeout", publishTimeout);
+        requirePositive("producerMaxBlock", producerMaxBlock);
+        requirePositive("claimLease", claimLease);
+        requirePositive("claimSafetyMargin", claimSafetyMargin);
+
         if (claimLease != null
                 && publishTimeout != null
-                && claimLease.compareTo(publishTimeout) <= 0) {
-            throw new IllegalArgumentException("claimLease must be longer than publishTimeout");
+                && producerMaxBlock != null
+                && claimSafetyMargin != null) {
+            Duration minimumLease = producerMaxBlock
+                    .plus(publishTimeout)
+                    .plus(claimSafetyMargin);
+            if (claimLease.compareTo(minimumLease) <= 0) {
+                throw new IllegalArgumentException(
+                        "claimLease must exceed producerMaxBlock + publishTimeout "
+                                + "+ claimSafetyMargin"
+                );
+            }
+        }
+    }
+
+    private static void requirePositive(String name, Duration duration) {
+        if (duration != null && (duration.isZero() || duration.isNegative())) {
+            throw new IllegalArgumentException(name + " must be positive");
         }
     }
 }

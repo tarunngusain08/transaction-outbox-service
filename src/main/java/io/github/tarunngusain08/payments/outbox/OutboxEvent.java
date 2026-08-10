@@ -101,16 +101,12 @@ public class OutboxEvent {
         clearClaim();
     }
 
-    public void recordFailure(String error, Instant failedAt, int maxRetries) {
-        retryCount++;
+    public void recordFailure(String error, Instant failedAt) {
+        if (retryCount < Integer.MAX_VALUE) {
+            retryCount++;
+        }
         lastError = truncate(error);
         clearClaim();
-
-        if (retryCount >= maxRetries) {
-            status = OutboxStatus.FAILED;
-            nextAttemptAt = failedAt;
-            return;
-        }
 
         long backoffSeconds = Math.min(300, 1L << Math.min(retryCount - 1, 30));
         status = OutboxStatus.PENDING;

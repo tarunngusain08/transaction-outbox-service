@@ -27,7 +27,7 @@ flowchart LR
         uc02(["UC-02 Retrieve transaction by ID"])
         uc03(["UC-03 Normalize legacy transaction"])
         uc04(["UC-04 Claim and publish a due outbox event"])
-        uc05(["UC-05 Retry or terminally fail delivery"])
+        uc05(["UC-05 Retry delivery until published"])
         uc06(["UC-06 Publish transaction-created contract"])
         uc07(["UC-07 Report application and outbox status"])
         uc08(["UC-08 Inspect retained operational history"])
@@ -55,11 +55,11 @@ flowchart LR
 | UC-01 | Implemented | API client sends strict `POST /api/v1/transactions` JSON | A database-native decision on `(sourceSystem, externalReference)` gives one concurrent winner: new input returns `201` and atomically commits a canonical transaction plus `PENDING` event; a matching durable-fingerprint replay returns the original record with `200` | Invalid/coerced/oversized input returns `400`; a differing or unverifiable historical fingerprint returns `409`; serialization/database failure rolls back the create |
 | UC-02 | Implemented | API client sends `GET /api/v1/transactions/{transactionId}` | Returns `200` with the stored canonical transaction | Unknown UUID returns `404`; a malformed UUID is rejected by Spring request binding with `400` |
 | UC-03 | Implemented | API client sends `POST /api/v1/transactions/normalize` with the legacy schema | Returns `200` with deterministic, create-compatible JSON and no server-owned fields; that body can be submitted unchanged to UC-01 | Legacy shape validation returns `400`; unsupported type, inexact/invalid amount, invalid date, or non-canonical output returns `422`; normalization itself has no database or Kafka side effect |
-| UC-04 | Implemented | Scheduled poller claims due `PENDING` or expired `PROCESSING` rows | A short `SKIP LOCKED` transaction commits claim tokens; Kafka I/O runs without a DB transaction; a guarded short transaction records `PUBLISHED` | Concurrent workers receive disjoint batches; abandoned leases become claimable; a stale worker cannot finalize a newer claim |
-| UC-05 | Implemented | Kafka send throws, times out, or is interrupted | A guarded finalize increments `retry_count`, stores a bounded root error, releases the claim, and schedules exponential backoff up to the formula's 5-minute cap | The configured attempt limit produces `FAILED`; interruption stops the remaining batch; no replay path exists yet |
+| UC-04 | Implemented | Scheduled poller claims a due `PENDING` or expired `PROCESSING` row immediately before each send | A short `SKIP LOCKED` transaction commits one claim token; Kafka I/O runs without a DB transaction; a guarded short transaction records `PUBLISHED` | Concurrent workers receive disjoint claims; later batch entries are never pre-claimed; abandoned leases become claimable; a stale worker cannot finalize a newer claim |
+| UC-05 | Implemented | Kafka send throws, times out, or is interrupted | An ordinary failure increments `retry_count`, stores a bounded root error, releases the claim, and schedules indefinite exponential backoff capped at five minutes | Interruption preserves the interrupt, consumes no retry, leaves `PROCESSING` ownership for lease recovery, and stops the batch; V6 recovers historical terminal rows |
 | UC-06 | Implemented contract | UC-04 sends `TRANSACTION_CREATED` to `payments.transactions.created` | Kafka receives transaction ID as key and a version-1 envelope with producer, event identity/time, and canonical body | Delivery is at least once; external consumers, not this service, must validate the version and deduplicate on `eventId` |
-| UC-07 | Implemented | Probe calls `/actuator/health` or operator calls `/actuator/outbox` | Basic application health remains independent; outbox status reports pending/processing/failed counts and oldest unpublished age | Compose readiness can be `UP` during broker backlog by design; alert routing and thresholds remain planned |
-| UC-08 | Implemented | Local database operator queries PostgreSQL directly | Retained mutable rows expose status, retry count, error, claim, and publication state for diagnosis | This is operational history, not tamper-evident audit storage; no operator HTTP replay or archival job exists |
+| UC-07 | Implemented | Probe calls `/actuator/health` or operator calls `/actuator/outbox` | Basic application health remains independent; outbox status reports pending/processing counts and oldest unpublished age | Compose readiness can be `UP` during broker backlog by design; alert routing and thresholds remain planned |
+| UC-08 | Implemented | Local database operator queries PostgreSQL directly | Retained mutable rows expose status, retry count, error, claim, and publication state for diagnosis | This is operational history, not tamper-evident audit storage; no operator mutation API or archival job exists |
 
 ## Implemented engineering use cases
 
@@ -123,7 +123,7 @@ flowchart LR
         p01(["UC-P01 Authenticate and authorize requests"])
         p02(["UC-P02 Enforce request rate limits"])
         p03(["UC-P03 Protect account identifiers and logs"])
-        p04(["UC-P04 Replay a FAILED outbox event"])
+        p04(["UC-P04 Expedite a persistent delivery retry"])
         p05(["UC-P05 Archive eligible PUBLISHED events"])
         p06(["UC-P06 Export telemetry and alert on SLOs"])
         p07(["UC-P07 Enforce event-schema compatibility"])
@@ -148,8 +148,8 @@ flowchart LR
 | UC-P01 | Planned | API client presents credentials; security policy is administered externally | Reject unauthenticated/unauthorized calls and attach an auditable principal to allowed operations |
 | UC-P02 | Planned | API client exceeds a configured request budget | Enforce documented per-principal/client limits and return a deterministic throttling response without partial writes |
 | UC-P03 | Planned | An allowed request contains account identifiers | Tokenize or encrypt stored identifiers, redact logs/errors, and define controlled detokenization access where required |
-| UC-P04 | Planned | Authorized operator selects a `FAILED` event | Requeue safely without changing the business transaction, preserve `eventId` idempotency semantics, and record who replayed what and why |
-| UC-P05 | Planned | Retention scheduler finds old `PUBLISHED` events past policy | Copy to approved audit storage, verify the archive, then remove/partition source rows without touching `PENDING` or `FAILED` events |
+| UC-P04 | Planned | Authorized operator selects a persistently failing `PENDING` event after resolving the dependency | Make the existing event due immediately without changing the business transaction or `eventId`, and audit who expedited it and why |
+| UC-P05 | Planned | Retention scheduler finds old `PUBLISHED` events past policy | Copy to approved audit storage, verify the archive, then remove/partition source rows without touching `PENDING` or `PROCESSING` events |
 | UC-P06 | Planned | Request/outbox activity or an SLO breach occurs | Export correlated traces and broker/database/outbox metrics; provide dashboards and actionable alerts |
 | UC-P07 | Planned | CI proposes an event-schema change | Check the chosen compatibility mode against the registry and block incompatible deployment before producers emit the change |
 
@@ -163,13 +163,13 @@ Every use case above is represented in
 | UC-01 | Create and atomically stage an event; reject invalid or duplicate create |
 | UC-02 | Retrieve a transaction |
 | UC-03 | Normalize a legacy transaction |
-| UC-04, UC-05, UC-06 | Claim, deliver, retry, or fail an outbox event; claim disjoint concurrent work |
+| UC-04, UC-05, UC-06 | Claim, deliver, or recover an outbox event; claim disjoint concurrent work |
 | UC-07, UC-08 | Report application/delivery status; inspect retained operational history |
 | ENG-01, ENG-02 | Build and run the local stack |
 | ENG-03, ENG-06 | Execute local and CI quality gates |
 | ENG-04, ENG-05 | Verify smoke and concurrent load traffic |
 | UC-P01, UC-P02, UC-P03 | Planned secured request path |
-| UC-P04 | Planned operator replay |
+| UC-P04 | Planned operator retry expedite |
 | UC-P05 | Planned archival workflow |
 | UC-P06 | Planned telemetry and SLO alerting |
 | UC-P07 | Planned schema-compatibility gate |

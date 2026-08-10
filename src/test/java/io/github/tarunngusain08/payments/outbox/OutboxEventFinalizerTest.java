@@ -2,7 +2,6 @@ package io.github.tarunngusain08.payments.outbox;
 
 import org.junit.jupiter.api.Test;
 
-import java.time.Duration;
 import java.time.Instant;
 import java.util.Optional;
 import java.util.UUID;
@@ -22,7 +21,7 @@ class OutboxEventFinalizerTest {
         UUID token = UUID.randomUUID();
         event.claim(token, NOW);
         when(repository.findByIdForUpdate(event.getId())).thenReturn(Optional.of(event));
-        var finalizer = new OutboxEventFinalizer(repository, properties());
+        var finalizer = new OutboxEventFinalizer(repository);
         var staleClaim = new ClaimedOutboxEvent(
                 event.getId(),
                 event.getAggregateId(),
@@ -54,7 +53,7 @@ class OutboxEventFinalizerTest {
         UUID token = UUID.randomUUID();
         event.claim(token, NOW);
         when(repository.findByIdForUpdate(event.getId())).thenReturn(Optional.of(event));
-        var finalizer = new OutboxEventFinalizer(repository, properties());
+        var finalizer = new OutboxEventFinalizer(repository);
         var claim = new ClaimedOutboxEvent(
                 event.getId(),
                 event.getAggregateId(),
@@ -68,17 +67,6 @@ class OutboxEventFinalizerTest {
         assertThat(event.getStatus()).isEqualTo(OutboxStatus.PENDING);
         assertThat(event.getClaimToken()).isNull();
         assertThat(event.getClaimedAt()).isNull();
-    }
-
-    private OutboxProperties properties() {
-        return new OutboxProperties(
-                "payments.transactions.created",
-                Duration.ofSeconds(1),
-                50,
-                8,
-                Duration.ofSeconds(10),
-                Duration.ofSeconds(30)
-        );
     }
 
     private OutboxEvent pendingEvent() {

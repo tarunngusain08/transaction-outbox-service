@@ -15,8 +15,7 @@ public class OutboxDeliveryEndpoint {
 
     private static final List<OutboxStatus> UNPUBLISHED_STATUSES = List.of(
             OutboxStatus.PENDING,
-            OutboxStatus.PROCESSING,
-            OutboxStatus.FAILED
+            OutboxStatus.PROCESSING
     );
 
     private final OutboxEventRepository outboxRepository;
@@ -40,7 +39,6 @@ public class OutboxDeliveryEndpoint {
         return new OutboxDeliverySnapshot(
                 outboxRepository.countByStatus(OutboxStatus.PENDING),
                 outboxRepository.countByStatus(OutboxStatus.PROCESSING),
-                outboxRepository.countByStatus(OutboxStatus.FAILED),
                 oldestAgeSeconds,
                 now
         );

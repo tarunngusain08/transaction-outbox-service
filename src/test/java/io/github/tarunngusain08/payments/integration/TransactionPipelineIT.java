@@ -144,7 +144,7 @@ class TransactionPipelineIT {
         var snapshot = objectMapper.readTree(outboxSnapshot.body());
         assertThat(snapshot.path("pending").asLong()).isZero();
         assertThat(snapshot.path("processing").asLong()).isZero();
-        assertThat(snapshot.path("failed").asLong()).isZero();
+        assertThat(snapshot.has("failed")).isFalse();
     }
 
     @Test

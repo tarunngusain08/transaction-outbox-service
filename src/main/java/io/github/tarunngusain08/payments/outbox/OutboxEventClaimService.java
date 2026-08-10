@@ -6,8 +6,7 @@ import org.springframework.transaction.annotation.Transactional;
 
 import java.time.Clock;
 import java.time.Instant;
-import java.util.ArrayList;
-import java.util.List;
+import java.util.Optional;
 import java.util.UUID;
 
 @Service
@@ -28,32 +27,29 @@ public class OutboxEventClaimService {
     }
 
     @Transactional(propagation = Propagation.REQUIRES_NEW)
-    public List<ClaimedOutboxEvent> claimBatch() {
+    public Optional<ClaimedOutboxEvent> claimNext() {
         Instant now = Instant.now(clock);
         Instant expiredBefore = now.minus(properties.claimLease());
-        var eventIds = outboxRepository.findClaimableEventIds(
+        var eventId = outboxRepository.findNextClaimableEventId(
                 now,
-                expiredBefore,
-                properties.batchSize()
-        );
-        var claimedEvents = new ArrayList<ClaimedOutboxEvent>(eventIds.size());
-
-        for (var eventId : eventIds) {
-            var event = outboxRepository.findById(eventId).orElse(null);
-            if (event == null) {
-                continue;
-            }
-
-            UUID claimToken = UUID.randomUUID();
-            event.claim(claimToken, now);
-            claimedEvents.add(new ClaimedOutboxEvent(
-                    event.getId(),
-                    event.getAggregateId(),
-                    event.getPayload(),
-                    claimToken
-            ));
+                expiredBefore
+        ).orElse(null);
+        if (eventId == null) {
+            return Optional.empty();
         }
 
-        return List.copyOf(claimedEvents);
+        var event = outboxRepository.findById(eventId).orElse(null);
+        if (event == null) {
+            return Optional.empty();
+        }
+
+        UUID claimToken = UUID.randomUUID();
+        event.claim(claimToken, now);
+        return Optional.of(new ClaimedOutboxEvent(
+                event.getId(),
+                event.getAggregateId(),
+                event.getPayload(),
+                claimToken
+        ));
     }
 }

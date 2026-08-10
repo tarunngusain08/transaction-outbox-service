@@ -118,6 +118,37 @@ class MigrationUpgradeIT {
         }
     }
 
+    @Test
+    void recoversHistoricalFailedOutboxRowsWithoutLosingDiagnosticHistory() throws Exception {
+        String schema = createSchema("outbox_recovery");
+        flyway(schema, MigrationVersion.fromVersion("5")).migrate();
+        UUID transactionId = insertV2Transaction(schema, "OUTBOX-RECOVERY");
+        UUID eventId = insertFailedOutboxEvent(schema, transactionId);
+
+        flyway(schema, null).migrate();
+
+        try (var connection = connection();
+             var statement = connection.prepareStatement("""
+                     SELECT status, next_attempt_at, retry_count, last_error
+                     FROM %s.outbox_events
+                     WHERE id = ?
+                     """.formatted(schema))) {
+            statement.setObject(1, eventId);
+            try (var rows = statement.executeQuery()) {
+                assertThat(rows.next()).isTrue();
+                assertThat(rows.getString("status")).isEqualTo("PENDING");
+                assertThat(rows.getTimestamp("next_attempt_at").toInstant())
+                        .isAfter(Instant.parse("2026-08-08T09:02:11Z"));
+                assertThat(rows.getInt("retry_count")).isEqualTo(8);
+                assertThat(rows.getString("last_error")).isEqualTo("historical broker outage");
+            }
+        }
+
+        assertThatThrownBy(() -> setOutboxStatus(schema, eventId, "FAILED"))
+                .isInstanceOf(SQLException.class)
+                .hasMessageContaining("chk_outbox_");
+    }
+
     private String createSchema(String prefix) throws SQLException {
         String schema = prefix + "_" + UUID.randomUUID().toString().replace("-", "");
         try (var connection = connection(); var statement = connection.createStatement()) {
@@ -174,6 +205,47 @@ class MigrationUpgradeIT {
             assertThat(statement.executeUpdate()).isOne();
         }
         return transactionId;
+    }
+
+    private UUID insertFailedOutboxEvent(String schema, UUID transactionId) throws SQLException {
+        UUID eventId = UUID.randomUUID();
+        try (var connection = connection();
+             var statement = connection.prepareStatement("""
+                     INSERT INTO %s.outbox_events (
+                         id,
+                         aggregate_type,
+                         aggregate_id,
+                         event_type,
+                         payload,
+                         status,
+                         created_at,
+                         next_attempt_at,
+                         retry_count,
+                         last_error
+                     ) VALUES (?, 'TRANSACTION', ?, 'TRANSACTION_CREATED',
+                               CAST(? AS JSONB), 'FAILED', ?, ?, 8, ?)
+                     """.formatted(schema))) {
+            Instant historicalTime = Instant.parse("2026-08-08T09:02:11Z");
+            statement.setObject(1, eventId);
+            statement.setObject(2, transactionId);
+            statement.setString(3, "{\"eventId\":\"" + eventId + "\"}");
+            statement.setTimestamp(4, Timestamp.from(historicalTime));
+            statement.setTimestamp(5, Timestamp.from(historicalTime));
+            statement.setString(6, "historical broker outage");
+            assertThat(statement.executeUpdate()).isOne();
+        }
+        return eventId;
+    }
+
+    private void setOutboxStatus(String schema, UUID eventId, String status) throws SQLException {
+        try (var connection = connection();
+             var statement = connection.prepareStatement(
+                     "UPDATE %s.outbox_events SET status = ? WHERE id = ?".formatted(schema)
+             )) {
+            statement.setString(1, status);
+            statement.setObject(2, eventId);
+            statement.executeUpdate();
+        }
     }
 
     private void mutateAuditRow(String schema, UUID transactionId) throws SQLException {

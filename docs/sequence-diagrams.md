@@ -156,7 +156,7 @@ sequenceDiagram
     end
 ```
 
-### UC-04, UC-05, UC-06 — Deliver, retry, or terminally fail an outbox event
+### UC-04, UC-05, UC-06 — Deliver, retry, or recover an outbox event
 
 ```mermaid
 sequenceDiagram
@@ -171,50 +171,53 @@ sequenceDiagram
     participant Consumer as External consumer
 
     Scheduler->>Publisher: publishPendingBatch() on fixed delay
-    Publisher->>Claim: claimBatch()
-    Note over Claim,DB: Short REQUIRES_NEW claim transaction
-    Claim->>DB: SELECT due PENDING or expired PROCESSING rows FOR UPDATE SKIP LOCKED
-    DB-->>Claim: Disjoint bounded event IDs
-    Claim->>DB: Set PROCESSING, claim_token, claimed_at
-    Claim->>DB: Commit and release every row lock
-    Claim-->>Publisher: Immutable claimed event snapshots
-    loop Each claimed event
-        Publisher->>Delivery: deliver(claimed event)
-        Note over Delivery,Kafka: No database transaction or row lock is open
-        Delivery->>Kafka: Send key=transactionId and stored versioned JSON, then await acknowledgement
-        Kafka-->>Consumer: Record may be observable before DB finalize commit
-        Consumer->>Consumer: Validate schemaVersion and deduplicate by eventId
-        alt Broker acknowledges before timeout
-            Kafka-->>Delivery: Send result
-            Delivery->>Finalizer: markPublished(eventId, claimToken)
-            Note over Finalizer,DB: Short REQUIRES_NEW finalize transaction
-            Finalizer->>DB: Lock row and require current PROCESSING claim token
-            alt Claim token is still current
-                Finalizer->>DB: Set PUBLISHED and published_at, clear claim/error, then commit
-                Finalizer-->>Delivery: PUBLISHED
-            else Lease was reclaimed or row changed
-                Finalizer->>DB: Commit without mutation
-                Finalizer-->>Delivery: SKIPPED
-            end
-        else Send fails, times out, or is interrupted
-            Delivery->>Finalizer: recordFailure(eventId, claimToken, bounded error)
-            Finalizer->>DB: Lock row and require current PROCESSING claim token
-            alt Current claim and retry_count below maxRetries
-                Finalizer->>DB: Set PENDING and next_attempt_at, clear claim, then commit
-                Finalizer-->>Delivery: RETRY_SCHEDULED
-            else Current claim reaches maxRetries
-                Finalizer->>DB: Set FAILED, clear claim, then commit
-                Finalizer-->>Delivery: PERMANENTLY_FAILED
-            else Claim token is stale
-                Finalizer->>DB: Commit without mutation
-                Finalizer-->>Delivery: SKIPPED
-            end
-            opt Thread was interrupted
+    loop At most configured batchSize times
+        Publisher->>Claim: claimNext()
+        Note over Claim,DB: Short REQUIRES_NEW transaction immediately before this send
+        Claim->>DB: SELECT one due PENDING or expired PROCESSING row FOR UPDATE SKIP LOCKED
+        alt No row is due
+            DB-->>Claim: Empty
+            Claim-->>Publisher: Empty
+            Publisher->>Publisher: Return from this scheduled run
+        else One row is selected
+            DB-->>Claim: Event ID
+            Claim->>DB: Set PROCESSING, claim_token, claimed_at, then commit
+            Claim-->>Publisher: One immutable claimed snapshot
+            Publisher->>Delivery: deliver(claimed event) immediately
+            Note over Delivery,Kafka: No database transaction or row lock is open
+            Delivery->>Kafka: Send key=transactionId and stored JSON, then await acknowledgement
+            alt Broker acknowledges before timeout
+                Kafka-->>Consumer: Record may be observable before DB finalize commit
+                Consumer->>Consumer: Validate schemaVersion and deduplicate by eventId
+                Kafka-->>Delivery: Send result
+                Delivery->>Finalizer: markPublished(eventId, claimToken)
+                Note over Finalizer,DB: Short REQUIRES_NEW finalize transaction
+                Finalizer->>DB: Lock row and require current PROCESSING claim token
+                alt Claim token is still current
+                    Finalizer->>DB: Set PUBLISHED and published_at, clear claim/error, then commit
+                    Finalizer-->>Delivery: PUBLISHED
+                else Lease was reclaimed or row changed
+                    Finalizer->>DB: Commit without mutation
+                    Finalizer-->>Delivery: SKIPPED
+                end
+            else Non-interruption failure or timeout
+                Delivery->>Finalizer: recordFailure(eventId, claimToken, bounded error)
+                Finalizer->>DB: Lock row and require current PROCESSING claim token
+                alt Claim token is current
+                    Finalizer->>DB: Increment retry_count, set due PENDING with capped backoff, clear claim
+                    Finalizer-->>Delivery: RETRY_SCHEDULED
+                else Claim token is stale
+                    Finalizer->>DB: Commit without mutation
+                    Finalizer-->>Delivery: SKIPPED
+                end
+            else Sender is interrupted
                 Delivery-->>Publisher: INTERRUPTED and preserve interrupt flag
-                Publisher->>Publisher: Stop batch before any later send
+                Note over Delivery,DB: No failure finalize and row stays PROCESSING with unchanged retry_count
+                Publisher->>Publisher: Return before another claim and let lease expiry recover ownership
             end
         end
     end
+    Note over Publisher,DB: Later batch entries are never pre-claimed
     Note over Delivery,Kafka: Acknowledgement plus finalize failure or lease expiry can produce a duplicate publish
 ```
 
@@ -228,24 +231,24 @@ sequenceDiagram
     participant DB as PostgreSQL
     participant Kafka as Kafka broker
 
-    par Claim transaction A
-        WorkerA->>DB: SELECT bounded due rows FOR UPDATE SKIP LOCKED
-        DB-->>WorkerA: Batch A
-        WorkerA->>DB: Mark Batch A PROCESSING with claim tokens, then commit
-    and Claim transaction B
-        WorkerB->>DB: SELECT bounded due rows FOR UPDATE SKIP LOCKED
-        DB-->>WorkerB: Disjoint Batch B (locked rows skipped)
-        WorkerB->>DB: Mark Batch B PROCESSING with claim tokens, then commit
+    par Claim one event for worker A
+        WorkerA->>DB: SELECT one due row FOR UPDATE SKIP LOCKED
+        DB-->>WorkerA: Event A
+        WorkerA->>DB: Mark Event A PROCESSING with a claim token, then commit
+    and Claim one event for worker B
+        WorkerB->>DB: SELECT one due row FOR UPDATE SKIP LOCKED
+        DB-->>WorkerB: Disjoint Event B (locked Event A is skipped)
+        WorkerB->>DB: Mark Event B PROCESSING with a claim token, then commit
     end
     Note over WorkerA,WorkerB: Database locks are released before broker I/O
-    par Publish Batch A outside a DB transaction
-        WorkerA->>Kafka: Publish claimed payloads
-        Kafka-->>WorkerA: Acknowledgements
-        WorkerA->>DB: Guarded short finalize transactions
-    and Publish Batch B outside a DB transaction
-        WorkerB->>Kafka: Publish claimed payloads
-        Kafka-->>WorkerB: Acknowledgements
-        WorkerB->>DB: Guarded short finalize transactions
+    par Publish Event A outside a DB transaction
+        WorkerA->>Kafka: Publish Event A
+        Kafka-->>WorkerA: Acknowledgement
+        WorkerA->>DB: Guarded short finalize transaction
+    and Publish Event B outside a DB transaction
+        WorkerB->>Kafka: Publish Event B
+        Kafka-->>WorkerB: Acknowledgement
+        WorkerB->>DB: Guarded short finalize transaction
     end
     Note over WorkerA,DB: An abandoned PROCESSING lease becomes claimable after claimLease
 ```
@@ -270,7 +273,7 @@ sequenceDiagram
     else Separate asynchronous-delivery inspection
         Probe->>Actuator: GET /actuator/outbox
         Actuator->>Outbox: snapshot()
-        Outbox->>DB: Count PENDING / PROCESSING / FAILED and find oldest unpublished
+        Outbox->>DB: Count PENDING / PROCESSING and find oldest unpublished
         DB-->>Outbox: Delivery state
         Outbox-->>Probe: Counts, age in seconds, and checkedAt
     end
@@ -287,7 +290,7 @@ sequenceDiagram
 
     Operator->>PSQL: Query outbox_events
     PSQL->>DB: SELECT id, aggregate_id, status, retry_count, last_error, published_at
-    DB-->>PSQL: Retained PENDING / PROCESSING / PUBLISHED / FAILED rows
+    DB-->>PSQL: Retained PENDING / PROCESSING / PUBLISHED rows
     PSQL-->>Operator: Mutable operational and diagnostic view
     Note over Operator,DB: Current scope is read-only SQL with no operator HTTP API or replay command
 ```
@@ -445,7 +448,7 @@ sequenceDiagram
     Note over Security,Telemetry: Planned design where credential format, policy engine, and key/token service remain unselected
 ```
 
-### UC-P04 — Planned operator replay of a FAILED event
+### UC-P04 — Planned operator expedite of a persistent retry
 
 ```mermaid
 sequenceDiagram
@@ -453,30 +456,30 @@ sequenceDiagram
     actor Operator as Authorized operator
     participant Ops as Planned operator API / CLI
     participant Auth as Authorization policy
-    participant Replay as Planned replay service
+    participant RetryControl as Planned retry-control service
     participant DB as PostgreSQL
     participant Poller as Existing outbox poller
     participant Kafka as Kafka
 
-    Operator->>Ops: Replay FAILED event + reason
-    Ops->>Auth: Verify replay permission
+    Operator->>Ops: Expedite persistent retry + reason
+    Ops->>Auth: Verify delivery-control permission
     alt Permission denied
         Auth-->>Operator: Reject with no state change
     else Permission granted
-        Ops->>Replay: replay(eventId, principal, reason)
-        Replay->>DB: Lock event and require status=FAILED
-        alt Event is not FAILED or already replayed concurrently
-            DB-->>Replay: Not eligible
-            Replay-->>Operator: Conflict with no state change
-        else FAILED event is eligible
-            Replay->>DB: Audit replay decision and reset same eventId to due PENDING
-            DB-->>Replay: Commit
-            Replay-->>Operator: Replay accepted
+        Ops->>RetryControl: expedite(eventId, principal, reason)
+        RetryControl->>DB: Lock event and require retrying PENDING state
+        alt Event is published, actively claimed, or has never failed
+            DB-->>RetryControl: Not eligible
+            RetryControl-->>Operator: Conflict with no state change
+        else Persistently failing PENDING event is eligible
+            RetryControl->>DB: Audit decision and set existing event due now
+            DB-->>RetryControl: Commit
+            RetryControl-->>Operator: Retry expedite accepted
             Poller->>DB: Claim due PENDING event
             Poller->>Kafka: Publish using existing at-least-once flow
         end
     end
-    Note over Replay,Kafka: Keeping eventId preserves the existing consumer idempotency contract
+    Note over RetryControl,Kafka: Keeping eventId preserves the existing consumer idempotency contract
 ```
 
 ### UC-P05 — Planned archival of old PUBLISHED events
@@ -491,7 +494,7 @@ sequenceDiagram
 
     Scheduler->>ArchiveJob: Run with retention cutoff and bounded batch size
     ArchiveJob->>DB: Select PUBLISHED rows older than cutoff
-    DB-->>ArchiveJob: Batch containing no PENDING or FAILED rows
+    DB-->>ArchiveJob: Batch containing no PENDING or PROCESSING rows
     ArchiveJob->>Archive: Write immutable records + integrity metadata
     alt Archive write or verification fails
         Archive-->>ArchiveJob: Failure / mismatch
@@ -520,7 +523,7 @@ sequenceDiagram
     API->>DB: Business transaction
     DB-->>API: Commit or database error
     API->>Collector: Correlated request/database timing and error metrics without sensitive values
-    Poller->>Collector: Backlog age, batch, retry, and FAILED metrics
+    Poller->>Collector: Backlog age, claim, retry-count, and publish metrics
     Poller->>Kafka: Publish event
     Kafka-->>Poller: Broker acknowledgement or failure
     Poller->>Collector: Publish outcome and latency metric

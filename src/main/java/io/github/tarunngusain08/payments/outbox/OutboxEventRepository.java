@@ -19,13 +19,12 @@ public interface OutboxEventRepository extends JpaRepository<OutboxEvent, UUID> 
             WHERE (status = 'PENDING' AND next_attempt_at <= :now)
                OR (status = 'PROCESSING' AND claimed_at <= :expiredBefore)
             ORDER BY created_at
-            LIMIT :batchSize
+            LIMIT 1
             FOR UPDATE SKIP LOCKED
             """, nativeQuery = true)
-    List<UUID> findClaimableEventIds(
+    Optional<UUID> findNextClaimableEventId(
             @Param("now") Instant now,
-            @Param("expiredBefore") Instant expiredBefore,
-            @Param("batchSize") int batchSize
+            @Param("expiredBefore") Instant expiredBefore
     );
 
     @Lock(LockModeType.PESSIMISTIC_WRITE)

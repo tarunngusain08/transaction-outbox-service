@@ -162,9 +162,10 @@ Inspect asynchronous delivery separately from basic application health:
 curl http://localhost:8080/actuator/outbox
 ```
 
-The response reports `PENDING`, `PROCESSING`, and `FAILED` counts plus the age
-of the oldest unpublished row. It is an operational signal, not an authenticated
-replay interface.
+The response reports `PENDING` and `PROCESSING` counts plus the age of the
+oldest unpublished row. Delivery failures remain recoverable and retry with
+capped backoff; this endpoint is an operational signal, not a mutation
+interface.
 
 ## Build and test
 
@@ -234,11 +235,16 @@ Dependabot configuration is included.
 | `PAYMENTS_KAFKA_TOPIC` | `payments.transactions.created` |
 | `OUTBOX_POLL_DELAY` | `1s` |
 | `OUTBOX_BATCH_SIZE` | `50` |
-| `OUTBOX_MAX_RETRIES` | `8` |
 | `OUTBOX_PUBLISH_TIMEOUT` | `10s` |
 | `OUTBOX_CLAIM_LEASE` | `30s` |
+| `OUTBOX_CLAIM_SAFETY_MARGIN` | `5s` |
 | `KAFKA_MAX_BLOCK_MS` | `10000` |
 | `PAYMENTS_DB_PASSWORD` | `payments` (Compose-only local default) |
+
+Startup requires `OUTBOX_CLAIM_LEASE` to exceed `KAFKA_MAX_BLOCK_MS` plus
+`OUTBOX_PUBLISH_TIMEOUT` plus `OUTBOX_CLAIM_SAFETY_MARGIN`. The same
+`KAFKA_MAX_BLOCK_MS` value configures Kafka and the lease-envelope check, so
+those bounds cannot silently drift apart.
 
 For retry, concurrency, operational retention, and production-hardening details, see
 [docs/architecture.md](docs/architecture.md).
