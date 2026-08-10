@@ -171,23 +171,42 @@ class TransactionPipelineIT {
 
     @Test
     void explicitlyRetiresEveryV1RouteWithoutCreatingDurableState() throws Exception {
+        UUID transactionId = UUID.randomUUID();
         var responses = List.of(
-                post("/api/v1/transactions", historicalV1Request()),
-                post("/api/v1/transactions/normalize", legacyRequest()),
-                get("/api/v1/transactions/" + UUID.randomUUID())
+                new RetiredResponse(
+                        post("/api/v1/transactions", historicalV1Request()),
+                        "/api/v2/transactions"
+                ),
+                new RetiredResponse(
+                        post("/api/v1/transactions/normalize", legacyRequest()),
+                        "/api/v2/transactions/normalize"
+                ),
+                new RetiredResponse(
+                        get("/api/v1/transactions/" + transactionId),
+                        "/api/v2/transactions/" + transactionId
+                )
         );
 
-        for (var response : responses) {
+        for (var retiredResponse : responses) {
+            var response = retiredResponse.response();
             assertThat(response.statusCode()).isEqualTo(HttpStatus.GONE.value());
             assertThat(response.headers().firstValue("Link"))
-                    .contains("</api/v2/transactions>; rel=\"successor-version\"");
+                    .contains("<" + retiredResponse.successor()
+                            + ">; rel=\"successor-version\"");
             var problem = objectMapper.readTree(response.body());
             assertThat(problem.path("type").asText())
                     .isEqualTo("urn:transaction-outbox-service:api-version-retired");
-            assertThat(problem.path("successor").asText()).isEqualTo("/api/v2/transactions");
+            assertThat(problem.path("successor").asText())
+                    .isEqualTo(retiredResponse.successor());
         }
         assertThat(transactionRepository.count()).isZero();
         assertThat(outboxRepository.count()).isZero();
+    }
+
+    private record RetiredResponse(
+            HttpResponse<String> response,
+            String successor
+    ) {
     }
 
     @Test
