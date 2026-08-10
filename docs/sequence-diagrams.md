@@ -18,7 +18,7 @@ sequenceDiagram
     participant MVC as Spring MVC validation
     participant Controller as TransactionController
     participant Service as TransactionService
-    participant TxRepo as Transaction repository
+    participant Inserter as Native transaction inserter
     participant OutboxRepo as Outbox repository
     participant DB as PostgreSQL
 
@@ -26,13 +26,12 @@ sequenceDiagram
     MVC->>Controller: Valid CreateTransactionRequest
     Controller->>Service: create(request)
     Note over Service,DB: Spring opens the transaction before create method logic executes
-    Service->>Service: Trim reference and apply source defaults
-    Service->>TxRepo: findByExternalReference(canonical reference)
-    TxRepo->>DB: SELECT transaction
-    DB-->>TxRepo: empty
-    Service->>Service: Apply UUID, PENDING status, and UTC-time defaults
-    Service->>TxRepo: persist(transaction) and flush
-    TxRepo->>DB: Execute insert-only INSERT transactions
+    Service->>Service: Validate and canonicalize metadata/timestamps
+    Service->>Service: Apply UUID, PENDING, and receivedAt
+    Service->>Service: SHA-256 all canonical client-owned fields
+    Service->>Inserter: insertIfAbsent(transaction)
+    Inserter->>DB: INSERT ... ON CONFLICT DO NOTHING RETURNING id
+    DB-->>Inserter: New transaction id
     Service->>Service: Serialize version-1 TRANSACTION_CREATED with a new eventId
     Service->>OutboxRepo: save(PENDING event)
     OutboxRepo-->>Service: Managed event (SQL may be deferred)
@@ -64,28 +63,23 @@ sequenceDiagram
         MVC->>Controller: CreateTransactionRequest
         Controller->>Service: create(request)
         Note over Service,DB: Transaction starts before service method logic
-        Service->>DB: Read by trimmed external_reference
-        alt Reference already exists
-            DB-->>Service: Stored transaction
-            alt Canonical request matches stored fields
+        Service->>Service: Canonicalize input and calculate fingerprint
+        Service->>DB: INSERT ... ON CONFLICT DO NOTHING RETURNING id
+        alt This request wins the key
+            DB-->>Service: New transaction id
+            Service->>DB: Stage outbox row and commit both rows
+            Service-->>Controller: New transaction, created=true
+            Controller-->>Client: 201 Created + Location
+        else Key already committed or concurrently won
+            DB-->>Service: No returned id after winner commits
+            Service->>DB: SELECT by source_system and external_reference
+            DB-->>Service: Durable winning transaction
+            alt Version and fingerprint match
                 Service-->>Controller: Original transaction, replayed=true
                 Controller-->>Client: 200 OK + original Location
-            else Same reference has different fields
+            else Fingerprint differs or historical fingerprint is absent
                 Service->>Handler: DuplicateTransactionException
                 Handler-->>Client: 409 ProblemDetail
-            end
-        else New reference
-            Service->>DB: Insert-only transaction flush and stage outbox
-            alt Known primary/external unique constraint loses a race
-                DB-->>Service: DataIntegrityViolationException
-                Note over Service,DB: Spring rolls back the whole database transaction
-                Service->>Handler: Known unique constraint
-                Handler-->>Client: 409 ProblemDetail
-            else Unrelated integrity constraint fails
-                DB-->>Service: DataIntegrityViolationException
-                Note over Service,DB: Spring rolls back the whole database transaction
-                Service->>Handler: Unexpected integrity failure
-                Handler-->>Client: Sanitized 500 ProblemDetail
             end
         end
     end

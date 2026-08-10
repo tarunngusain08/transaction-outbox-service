@@ -13,7 +13,6 @@ import java.time.Clock;
 import java.time.Instant;
 import java.util.Comparator;
 import java.util.Map;
-import java.util.Objects;
 import java.util.UUID;
 
 @Service
@@ -25,6 +24,7 @@ public class TransactionService {
     private final OutboxEventRepository outboxRepository;
     private final TransactionEventSerializer eventSerializer;
     private final MetadataCanonicalizer metadataCanonicalizer;
+    private final TransactionRequestFingerprint requestFingerprint;
     private final Validator validator;
     private final Clock clock;
 
@@ -34,6 +34,7 @@ public class TransactionService {
             OutboxEventRepository outboxRepository,
             TransactionEventSerializer eventSerializer,
             MetadataCanonicalizer metadataCanonicalizer,
+            TransactionRequestFingerprint requestFingerprint,
             Validator validator,
             Clock clock
     ) {
@@ -42,6 +43,7 @@ public class TransactionService {
         this.outboxRepository = outboxRepository;
         this.eventSerializer = eventSerializer;
         this.metadataCanonicalizer = metadataCanonicalizer;
+        this.requestFingerprint = requestFingerprint;
         this.validator = validator;
         this.clock = clock;
     }
@@ -56,17 +58,11 @@ public class TransactionService {
         Instant createdAt = requestedCreatedAt == null ? receivedAt : requestedCreatedAt;
         TransactionContract.validateCreatedAt(createdAt, receivedAt);
         Map<String, Object> metadata = metadataCanonicalizer.canonicalize(request.metadata());
-
-        var existing = transactionRepository.findBySourceSystemAndExternalReference(
-                request.sourceSystem(),
-                request.externalReference()
+        String fingerprint = requestFingerprint.calculate(
+                request,
+                requestedCreatedAt,
+                metadata
         );
-        if (existing.isPresent()) {
-            if (matches(existing.get(), request, requestedCreatedAt, metadata)) {
-                return TransactionCreationResult.replayed(TransactionResponse.from(existing.get()));
-            }
-            throw new DuplicateTransactionException(request.externalReference());
-        }
 
         var transaction = new PaymentTransaction(
                 UUID.randomUUID(),
@@ -82,11 +78,29 @@ public class TransactionService {
                 createdAt,
                 receivedAt,
                 metadata,
-                null,
-                null
+                fingerprint,
+                TransactionRequestFingerprint.VERSION
         );
 
-        transactionInserter.insert(transaction);
+        if (!transactionInserter.insertIfAbsent(transaction)) {
+            var existing = transactionRepository.findBySourceSystemAndExternalReference(
+                    request.sourceSystem(),
+                    request.externalReference()
+            ).orElseThrow(() -> new IllegalStateException(
+                    "conflicting transaction disappeared after insert-if-absent"
+            ));
+            if (existing.getRequestFingerprintVersion() != null
+                    && existing.getRequestFingerprintVersion()
+                    == TransactionRequestFingerprint.VERSION
+                    && fingerprint.equals(existing.getRequestFingerprint())) {
+                return TransactionCreationResult.replayed(TransactionResponse.from(existing));
+            }
+            throw new DuplicateTransactionException(
+                    request.sourceSystem(),
+                    request.externalReference()
+            );
+        }
+
         var response = TransactionResponse.from(transaction);
         var eventId = UUID.randomUUID();
         var event = new TransactionCreatedEvent(
@@ -130,19 +144,4 @@ public class TransactionService {
                 });
     }
 
-    private boolean matches(
-            PaymentTransaction existing,
-            CreateTransactionRequest request,
-            Instant requestedCreatedAt,
-            Map<String, Object> metadata
-    ) {
-        return request.amount() == existing.getAmountMinor()
-                && request.currency().equals(existing.getCurrency())
-                && request.type() == existing.getType()
-                && request.sourceAccount().equals(existing.getSourceAccount())
-                && request.destinationAccount().equals(existing.getDestinationAccount())
-                && request.channel() == existing.getChannel()
-                && (requestedCreatedAt == null || requestedCreatedAt.equals(existing.getCreatedAt()))
-                && Objects.equals(metadata, existing.getMetadata());
-    }
 }

@@ -12,9 +12,18 @@
 
 ## Consistency boundary
 
-`TransactionService.create` is the business transaction boundary. It writes the
-canonical transaction and its `TRANSACTION_CREATED` outbox event through JPA in
-one PostgreSQL transaction. No Kafka call occurs on the request thread.
+`TransactionService.create` is the business transaction boundary. It uses a
+PostgreSQL `INSERT ... ON CONFLICT DO NOTHING RETURNING id` decision for the
+case-sensitive `(sourceSystem, externalReference)` key. The winner writes the
+canonical transaction and its `TRANSACTION_CREATED` outbox event in one
+PostgreSQL transaction. No Kafka call occurs on the request thread.
+
+Every new transaction stores a versioned SHA-256 fingerprint of all canonical
+client-owned fields. A loser reads the committed winner: an equal durable
+fingerprint returns the original transaction as an idempotent replay; a
+different or absent fingerprint returns `409 Conflict`. Consequently,
+concurrent requests cannot both perform a preliminary read and then race to
+create duplicate state, and historical rows are never guessed equivalent.
 
 This avoids the classic dual-write failure where a transaction commits but no
 durable event record accompanies it. A serialization or database failure rolls

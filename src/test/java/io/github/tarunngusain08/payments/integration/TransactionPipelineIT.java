@@ -32,9 +32,13 @@ import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.time.Duration;
 import java.time.Instant;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Properties;
 import java.util.UUID;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.awaitility.Awaitility.await;
@@ -162,6 +166,96 @@ class TransactionPipelineIT {
                         .singleElement()
                         .extracting(event -> event.getStatus())
                         .isEqualTo(OutboxStatus.PUBLISHED));
+        assertThat(transactionRepository.count()).isEqualTo(1);
+        assertThat(outboxRepository.count()).isEqualTo(1);
+    }
+
+    @Test
+    void atomicallyCreatesOrReplaysConcurrentIdenticalRequests() throws Exception {
+        int workers = 12;
+        String request = canonicalRequest("IT-CONCURRENT-" + UUID.randomUUID());
+        var ready = new CountDownLatch(workers);
+        var start = new CountDownLatch(1);
+        var executor = Executors.newFixedThreadPool(workers);
+
+        try {
+            var futures = new ArrayList<java.util.concurrent.Future<HttpResponse<String>>>();
+            for (int index = 0; index < workers; index++) {
+                futures.add(executor.submit(() -> {
+                    ready.countDown();
+                    if (!start.await(5, TimeUnit.SECONDS)) {
+                        throw new IllegalStateException("concurrent create start gate timed out");
+                    }
+                    return post("/api/v1/transactions", request);
+                }));
+            }
+
+            assertThat(ready.await(5, TimeUnit.SECONDS)).isTrue();
+            start.countDown();
+
+            var responses = new ArrayList<HttpResponse<String>>();
+            for (var future : futures) {
+                responses.add(future.get(15, TimeUnit.SECONDS));
+            }
+
+            assertThat(responses).filteredOn(response -> response.statusCode() == 201).hasSize(1);
+            assertThat(responses).filteredOn(response -> response.statusCode() == 200)
+                    .hasSize(workers - 1);
+            assertThat(responses)
+                    .extracting(response -> objectMapper.readTree(response.body())
+                            .path("transactionId").asString())
+                    .containsOnly(objectMapper.readTree(responses.getFirst().body())
+                            .path("transactionId").asString());
+        } finally {
+            executor.shutdownNow();
+        }
+
+        assertThat(transactionRepository.count()).isEqualTo(1);
+        assertThat(outboxRepository.count()).isEqualTo(1);
+    }
+
+    @Test
+    void atomicallyCreatesOneOfTwoConcurrentConflictingRequests() throws Exception {
+        String externalReference = "IT-CONFLICT-" + UUID.randomUUID();
+        String firstRequest = canonicalRequest(externalReference);
+        String secondRequest = firstRequest.replace("150000", "999");
+        var ready = new CountDownLatch(2);
+        var start = new CountDownLatch(1);
+        var executor = Executors.newFixedThreadPool(2);
+
+        try {
+            var first = executor.submit(() -> gatedPost(ready, start, firstRequest));
+            var second = executor.submit(() -> gatedPost(ready, start, secondRequest));
+
+            assertThat(ready.await(5, TimeUnit.SECONDS)).isTrue();
+            start.countDown();
+
+            var responses = List.of(
+                    first.get(15, TimeUnit.SECONDS),
+                    second.get(15, TimeUnit.SECONDS)
+            );
+            assertThat(responses)
+                    .extracting(HttpResponse::statusCode)
+                    .containsExactlyInAnyOrder(
+                            HttpStatus.CREATED.value(),
+                            HttpStatus.CONFLICT.value()
+                    );
+
+            var createdResponse = responses.stream()
+                    .filter(response -> response.statusCode() == HttpStatus.CREATED.value())
+                    .findFirst()
+                    .orElseThrow();
+            var created = objectMapper.readValue(createdResponse.body(), TransactionResponse.class);
+            var stored = transactionRepository.findBySourceSystemAndExternalReference(
+                    "DIRECT_API",
+                    externalReference
+            ).orElseThrow();
+            assertThat(stored.getId()).isEqualTo(created.transactionId());
+            assertThat(stored.getAmountMinor()).isEqualTo(created.amount());
+        } finally {
+            executor.shutdownNow();
+        }
+
         assertThat(transactionRepository.count()).isEqualTo(1);
         assertThat(outboxRepository.count()).isEqualTo(1);
     }
@@ -348,6 +442,18 @@ class TransactionPipelineIT {
                 .POST(HttpRequest.BodyPublishers.ofString(body))
                 .build();
         return httpClient.send(request, HttpResponse.BodyHandlers.ofString());
+    }
+
+    private HttpResponse<String> gatedPost(
+            CountDownLatch ready,
+            CountDownLatch start,
+            String body
+    ) throws Exception {
+        ready.countDown();
+        if (!start.await(5, TimeUnit.SECONDS)) {
+            throw new IllegalStateException("concurrent create start gate timed out");
+        }
+        return post("/api/v1/transactions", body);
     }
 
     private HttpResponse<String> get(String path) throws Exception {

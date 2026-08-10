@@ -48,16 +48,19 @@ class TransactionServiceTest {
     private TransactionEventSerializer eventSerializer;
 
     private TransactionService service;
+    private TransactionRequestFingerprint fingerprint;
 
     @BeforeEach
     void setUp() {
         var validator = Validation.buildDefaultValidatorFactory().getValidator();
+        fingerprint = new TransactionRequestFingerprint(new ObjectMapper());
         service = new TransactionService(
                 transactionRepository,
                 transactionInserter,
                 outboxRepository,
                 eventSerializer,
                 new MetadataCanonicalizer(new ObjectMapper()),
+                fingerprint,
                 validator,
                 Clock.fixed(NOW, ZoneOffset.UTC)
         );
@@ -65,6 +68,7 @@ class TransactionServiceTest {
 
     @Test
     void savesServerOwnedTransactionAndPendingOutboxEvent() {
+        when(transactionInserter.insertIfAbsent(any(PaymentTransaction.class))).thenReturn(true);
         when(eventSerializer.serialize(any(TransactionCreatedEvent.class)))
                 .thenReturn("{\"eventType\":\"TRANSACTION_CREATED\"}");
 
@@ -74,13 +78,15 @@ class TransactionServiceTest {
         assertThat(result.created()).isTrue();
 
         var transactionCaptor = ArgumentCaptor.forClass(PaymentTransaction.class);
-        verify(transactionInserter).insert(transactionCaptor.capture());
+        verify(transactionInserter).insertIfAbsent(transactionCaptor.capture());
         var savedTransaction = transactionCaptor.getValue();
         assertThat(savedTransaction.getId()).isNotNull();
         assertThat(savedTransaction.getSourceSystem()).isEqualTo("DIRECT_API");
         assertThat(savedTransaction.getStatus()).isEqualTo(TransactionStatus.PENDING);
         assertThat(savedTransaction.getCreatedAt()).isEqualTo(NOW);
         assertThat(savedTransaction.getReceivedAt()).isEqualTo(NOW);
+        assertThat(savedTransaction.getRequestFingerprint()).hasSize(64);
+        assertThat(savedTransaction.getRequestFingerprintVersion()).isEqualTo((short) 1);
 
         var eventCaptor = ArgumentCaptor.forClass(TransactionCreatedEvent.class);
         verify(eventSerializer).serialize(eventCaptor.capture());
@@ -103,21 +109,31 @@ class TransactionServiceTest {
 
     @Test
     void rejectsConflictingScopedReferenceBeforeWriting() {
+        when(transactionInserter.insertIfAbsent(any(PaymentTransaction.class))).thenReturn(false);
         when(transactionRepository.findBySourceSystemAndExternalReference(
                 "DIRECT_API",
                 "TXN-88213-ABC"
-        )).thenReturn(Optional.of(existingTransaction(999L, TransactionType.CREDIT)));
+        )).thenReturn(Optional.of(existingTransaction(
+                999L,
+                TransactionType.CREDIT,
+                "0".repeat(64)
+        )));
 
         assertThatThrownBy(() -> service.create(request()))
                 .isInstanceOf(DuplicateTransactionException.class)
                 .hasMessageContaining("TXN-88213-ABC");
 
-        verifyNoInteractions(transactionInserter, outboxRepository, eventSerializer);
+        verifyNoInteractions(outboxRepository, eventSerializer);
     }
 
     @Test
     void returnsOriginalTransactionForAnIdenticalReplay() {
-        var existing = existingTransaction(150_000L, TransactionType.DEBIT);
+        when(transactionInserter.insertIfAbsent(any(PaymentTransaction.class))).thenReturn(false);
+        var existing = existingTransaction(
+                150_000L,
+                TransactionType.DEBIT,
+                fingerprint.calculate(request(), null, Map.of("orderId", "ORDER-99"))
+        );
         when(transactionRepository.findBySourceSystemAndExternalReference(
                 "DIRECT_API",
                 "TXN-88213-ABC"
@@ -127,11 +143,28 @@ class TransactionServiceTest {
 
         assertThat(result.created()).isFalse();
         assertThat(result.transaction().transactionId()).isEqualTo(TRANSACTION_ID);
-        verifyNoInteractions(transactionInserter, outboxRepository, eventSerializer);
+        verifyNoInteractions(outboxRepository, eventSerializer);
+    }
+
+    @Test
+    void neverTreatsAHistoricalRowWithoutAFingerprintAsAnIdenticalReplay() {
+        when(transactionInserter.insertIfAbsent(any(PaymentTransaction.class))).thenReturn(false);
+        when(transactionRepository.findBySourceSystemAndExternalReference(
+                "DIRECT_API",
+                "TXN-88213-ABC"
+        )).thenReturn(Optional.of(existingTransaction(150_000L, TransactionType.DEBIT, null)));
+
+        assertThatThrownBy(() -> service.create(request()))
+                .isInstanceOf(DuplicateTransactionException.class)
+                .hasMessageContaining("DIRECT_API")
+                .hasMessageContaining("TXN-88213-ABC");
+
+        verifyNoInteractions(outboxRepository, eventSerializer);
     }
 
     @Test
     void canonicalizesTimestampAndIntegerMetadataBeforePersistence() {
+        when(transactionInserter.insertIfAbsent(any(PaymentTransaction.class))).thenReturn(true);
         when(eventSerializer.serialize(any(TransactionCreatedEvent.class))).thenReturn("{}");
         var preciseRequest = new CreateTransactionRequest(
                 "DIRECT_API",
@@ -149,7 +182,7 @@ class TransactionServiceTest {
         service.create(preciseRequest);
 
         var transactionCaptor = ArgumentCaptor.forClass(PaymentTransaction.class);
-        verify(transactionInserter).insert(transactionCaptor.capture());
+        verify(transactionInserter).insertIfAbsent(transactionCaptor.capture());
         assertThat(transactionCaptor.getValue().getCreatedAt())
                 .isEqualTo(Instant.parse("2026-08-08T10:15:29.123456Z"));
         assertThat(transactionCaptor.getValue().getMetadata())
@@ -186,7 +219,11 @@ class TransactionServiceTest {
                 .hasMessageContaining(TRANSACTION_ID.toString());
     }
 
-    private PaymentTransaction existingTransaction(long amount, TransactionType type) {
+    private PaymentTransaction existingTransaction(
+            long amount,
+            TransactionType type,
+            String requestFingerprint
+    ) {
         return new PaymentTransaction(
                 TRANSACTION_ID,
                 "DIRECT_API",
@@ -201,8 +238,8 @@ class TransactionServiceTest {
                 NOW,
                 NOW,
                 Map.of("orderId", "ORDER-99"),
-                null,
-                null
+                requestFingerprint,
+                TransactionRequestFingerprint.VERSION
         );
     }
 
