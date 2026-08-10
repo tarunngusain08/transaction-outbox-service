@@ -184,6 +184,10 @@ class TransactionPipelineIT {
                 new RetiredResponse(
                         get("/api/v1/transactions/" + transactionId),
                         "/api/v2/transactions/" + transactionId
+                ),
+                new RetiredResponse(
+                        get("/api/v1/transactions/not-a-uuid"),
+                        "/api/v2/transactions/not-a-uuid"
                 )
         );
 

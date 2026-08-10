@@ -11,7 +11,6 @@ import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
 
 import java.net.URI;
-import java.util.UUID;
 
 @RestController
 @RequestMapping("/api/v1/transactions")
@@ -31,7 +30,7 @@ public class RetiredV1TransactionController {
 
     @GetMapping("/{transactionId}")
     public ResponseEntity<ProblemDetail> retiredGetById(
-            @PathVariable UUID transactionId
+            @PathVariable String transactionId
     ) {
         return retired(V2_TRANSACTIONS + "/" + transactionId);
     }
