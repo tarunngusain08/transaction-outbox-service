@@ -167,8 +167,16 @@ sequenceDiagram
     participant DB as PostgreSQL
     participant Kafka as Kafka broker
 
-    Client->>Retired: POST or GET /api/v1/transactions route
-    Retired-->>Client: 410 Gone + stable ProblemDetail + V2 successor Link
+    alt Retired create
+        Client->>Retired: POST /api/v1/transactions
+        Retired-->>Client: 410 + successor /api/v2/transactions
+    else Retired normalization
+        Client->>Retired: POST /api/v1/transactions/normalize
+        Retired-->>Client: 410 + successor /api/v2/transactions/normalize
+    else Retired retrieval
+        Client->>Retired: GET /api/v1/transactions/{transactionId}
+        Retired-->>Client: 410 + same-ID /api/v2/transactions/{transactionId}
+    end
     Note over Retired,Service: V1 body is not bound or reinterpreted as V2
     Note over Service,DB: No service call and no transaction/outbox write
     Note over DB,Kafka: No row and no event are created
@@ -239,30 +247,47 @@ sequenceDiagram
     Note over Delivery,Kafka: Acknowledgement plus finalize failure or lease expiry can produce a duplicate publish
 ```
 
-### UC-10 — Quarantine pre-V2 unpublished events
+### UC-10, ENG-07 — Gate and quarantine pre-V2 unpublished events
 
 ```mermaid
 sequenceDiagram
     autonumber
     actor Operator as Deployment operator
     participant Writers as Application writers / pollers
-    participant Flyway as Flyway V6
+    participant Make as Make migration-v7-preflight
+    participant Flyway as Flyway V7
     participant DB as PostgreSQL
+    participant OldPublisher as Compatible pre-V2 publisher
     participant Publisher as V2 outbox publisher
     participant Kafka as Kafka broker
 
     Operator->>Writers: Stop every writer and poller
-    Operator->>DB: Snapshot and inventory unpublished historical rows
-    Operator->>Flyway: Apply V6 in one migration transaction
-    Flyway->>DB: Add quarantine evidence columns
-    Flyway->>DB: Move existing PENDING / PROCESSING / FAILED to QUARANTINED
-    Flyway->>DB: Preserve payload, retry/error/timestamps/prior status and clear claims
-    Flyway->>DB: Install and validate delivery-state constraints, then commit
-    Operator->>Writers: Start V2 application after migration verification
+    Operator->>DB: Take restorable snapshot and capture Flyway history
+    Operator->>Make: Run read-only repeatable-read preflight
+    Make->>DB: Count and inventory PENDING / PROCESSING / FAILED
+    DB-->>Operator: Worklist plus unresolved historical count
+    alt Count is zero
+        Operator->>Flyway: Validate immutable V1-V6 and apply V7
+        Flyway->>DB: Add quarantine evidence, discriminator constraint, and index
+        Flyway->>DB: Commit forward-only schema changes
+        Operator->>Writers: Start V2 application after verification
+    else Count is nonzero and can be drained
+        Operator->>OldPublisher: Start compatible publisher under controlled change
+        OldPublisher->>Kafka: Deliver historical payloads
+        OldPublisher->>DB: Record acknowledged rows PUBLISHED
+        Operator->>Writers: Stop old publisher, rerun preflight until zero
+        Operator->>Flyway: Apply V7 only after gate passes
+        Operator->>Writers: Start V2 application after verification
+    else Count is nonzero and cannot be drained
+        Operator->>Flyway: Optionally apply V7 for fail-safe containment
+        Flyway->>DB: Move post-V6 PENDING / PROCESSING to QUARANTINED
+        Flyway->>DB: Preserve payload/diagnostics and clear claims
+        Note over Operator,DB: Release remains incomplete until UC-P08 resolves every row
+    end
     Publisher->>DB: Claim only due PENDING or expired PROCESSING
     DB-->>Publisher: New V2 event or empty, never QUARANTINED
     Publisher->>Kafka: Publish only when a claimable V2 event exists
-    Note over DB,Kafka: Historical payload remains stored and cannot reach Kafka through the ordinary publisher
+    Note over DB,Kafka: Numeric schemaVersion 2 is only a discriminator, and consumers validate the full envelope
 ```
 
 ### UC-04 — Claim disjoint work across concurrent pollers
@@ -317,8 +342,9 @@ sequenceDiagram
     else Separate asynchronous-delivery inspection
         Probe->>Actuator: GET /actuator/outbox
         Actuator->>Outbox: snapshot()
-        Outbox->>DB: Count PENDING / PROCESSING / QUARANTINED and find oldest ages
-        DB-->>Outbox: Delivery state
+        Outbox->>DB: One aggregate query for all counts and oldest timestamps
+        DB-->>Outbox: One point-in-time delivery-state row
+        Note over Outbox,DB: Publishable age uses createdAt, and quarantine age uses quarantinedAt
         Outbox-->>Probe: Counts, age in seconds, and checkedAt
     end
 ```

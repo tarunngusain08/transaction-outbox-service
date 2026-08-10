@@ -8,13 +8,13 @@ transactional outbox, and normalizes a legacy bank JSON format.
 
 ```mermaid
 flowchart LR
-    client["API client"] --> create["POST /transactions"]
+    client["API client"] --> create["POST /api/v2/transactions"]
     create --> tx["TransactionService"]
     tx -->|"one DB transaction"| records[("transactions")]
     tx -->|"same DB transaction"| outbox[("outbox_events")]
     poller["Scheduled outbox poller"] -->|"short claim / finalize tx"| outbox
     poller -->|"publish outside DB tx"| kafka["Kafka topic"]
-    client --> normalize["POST /transactions/normalize"]
+    client --> normalize["POST /api/v2/transactions/normalize"]
     normalize --> canonical["Canonical transaction JSON"]
 ```
 
@@ -24,14 +24,16 @@ on `eventId`. Published rows are retained as mutable operational history; a real
 audit archive is a production follow-up in
 [the architecture notes](docs/architecture.md).
 
-The active public contract is V2. Requests to the retired V1 transaction routes
-receive `410 Gone` with a `Link` header naming `/api/v2/transactions`; they are
-never reinterpreted as V2 requests.
+The active public contract is V2. Requests to retired V1 create, normalize, and
+GET-by-ID routes receive `410 Gone` with a route-specific V2 successor `Link`;
+they are never reinterpreted as V2 requests.
 
 Detailed behavioral documentation:
 
 - [V2 versioning decision](docs/decisions/0002-api-event-versioning.md) — active
   API/event versions, explicit V1 retirement, and historical-event quarantine.
+- [Forward-only migration decision](docs/decisions/0003-forward-only-flyway-upgrades.md)
+  — immutable applied migrations and the supported V6-to-V7 upgrade path.
 - [Ingestion contract decision](docs/decisions/0001-v1-ingestion-contract.md) —
   exact money, identity, ownership, idempotency, metadata, migration,
   normalization, and outbox rules adopted by V2.
@@ -86,6 +88,7 @@ runs. `make reset` explicitly deletes both local volumes.
 | `make lint` | Run Checkstyle and compile-check the Python support scripts |
 | `make docs-lint` | Validate Markdown, links, traceability, and Mermaid syntax |
 | `make migration-preflight` | Produce the read-only V2-to-V3 reconciliation worklist |
+| `make migration-v7-preflight` | Gate V7 on the historical unpublished-event count |
 | `make traffic` | Start the stack and run the mixed end-to-end smoke scenario |
 | `make load-test` | Run configurable concurrent traffic with local acceptance bounds |
 | `make check` | Run static/docs checks, all tests, coverage, and the build |
@@ -172,11 +175,13 @@ Inspect asynchronous delivery separately from basic application health:
 curl http://localhost:8080/actuator/outbox
 ```
 
-The response reports `PENDING`, `PROCESSING`, and `QUARANTINED` counts, the age
-of the oldest publishable row, and the age of the oldest quarantined row.
+The response obtains `PENDING`, `PROCESSING`, and `QUARANTINED` counts plus both
+oldest timestamps in one point-in-time SQL statement. Publishable age starts at
+the event's `created_at`; quarantine age starts when V7 set `quarantined_at`.
 Current V2 delivery failures remain recoverable and retry with capped backoff.
 Quarantined historical payloads require a future authenticated compatibility
-workflow; this endpoint is an operational signal, not a mutation interface.
+workflow; this endpoint is an operational signal, not proof of delivery or a
+mutation interface.
 
 ## Build and test
 
@@ -189,9 +194,10 @@ claim/finalize state transitions, Kafka acknowledgement, interruption, and retry
 scheduling. The integration suite boots the real HTTP application against
 ephemeral PostgreSQL and Kafka, then proves insert-only persistence, strict JSON
 rejection, idempotent replay, Flyway constraints, atomic transaction/outbox
-commit, and a versioned consumed event. It also upgrades a realistic unpublished
-V1 event, proves it is quarantined, starts the real scheduler, and verifies that
-only a new V2 event reaches Kafka. The JaCoCo HTML report is written to
+commit, and a versioned consumed event. It byte-locks every migration from the
+previous M08 artifact, upgrades a populated V6 database, proves a realistic V1
+event is quarantined, starts the real scheduler, and verifies that only a new V2
+event reaches Kafka. The JaCoCo HTML report is written to
 `target/site/jacoco/index.html`.
 
 ### End-to-end traffic and load
@@ -271,10 +277,21 @@ Before upgrading a database at Flyway migration V2, follow the
 collision aborts before mutation; no historical transaction is automatically
 merged, renamed, deleted, moved, or selected as a winner.
 
-Before applying V6 to a database containing unpublished events, follow the
-[V6 event-quarantine runbook](docs/migrations/v6-event-quarantine.md). This
-prototype expects writers and pollers to be stopped while Flyway runs; it does
-not claim a rolling or zero-downtime schema upgrade.
+Before applying V7, stop writers and pollers, then run
+`make migration-v7-preflight` and follow the
+[V7 event-quarantine runbook](docs/migrations/v7-event-quarantine.md). A zero
+historical-unpublished count permits release. A nonzero count must be drained by
+the compatible old publisher or remains an explicit release blocker until the
+controlled UC-P08 workflow exists; quarantine alone is containment, not
+delivery completion.
+
+V1-V6 are preserved byte-for-byte from artifact `1d9d97c`. Databases on that
+canonical chain have a tested forward-only V7 upgrade. A disposable database
+that ran the temporary rewritten V3/V6 branch must be reset; non-disposable data
+on that divergent checksum history needs a separately reviewed migration and
+must never be reconciled with `flyway repair`, silent merging, or deletion. This
+prototype expects stopped writers and pollers and does not claim a rolling or
+zero-downtime schema upgrade.
 
 ## Scope and license
 

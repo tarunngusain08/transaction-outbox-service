@@ -19,6 +19,7 @@ flowchart LR
     apiClient["Actor: API client"]
     scheduler["Actor: Spring scheduler"]
     operator["Actor: Operator / health probe"]
+    deployment["Actor: Deployment operator"]
     migration["Actor: Flyway migration runner"]
     kafkaBroker["Actor: Kafka broker"]
     kafkaConsumer["Actor: Kafka consumer"]
@@ -33,13 +34,14 @@ flowchart LR
         uc07(["UC-07 Report application and outbox status"])
         uc08(["UC-08 Inspect retained operational history"])
         uc09(["UC-09 Reject retired API V1 explicitly"])
-        uc10(["UC-10 Quarantine pre-V2 unpublished events"])
+        uc10(["UC-10 Gate and quarantine pre-V2 events"])
     end
 
     apiClient --> uc01
     apiClient --> uc02
     apiClient --> uc03
     apiClient --> uc09
+    deployment --> uc10
     migration --> uc10
     scheduler --> uc04
     uc01 -->|atomically creates PENDING event| uc04
@@ -65,10 +67,10 @@ flowchart LR
 | UC-04 | Implemented | Scheduled poller claims a due `PENDING` or expired `PROCESSING` row immediately before each send | A short `SKIP LOCKED` transaction commits one claim token; Kafka I/O runs without a DB transaction; a guarded short transaction records `PUBLISHED` | Concurrent workers receive disjoint claims; later batch entries are never pre-claimed; abandoned leases become claimable; a stale worker cannot finalize a newer claim |
 | UC-05 | Implemented | Kafka send throws, times out, or is interrupted | An ordinary V2 failure increments `retry_count`, stores a bounded root error, releases the claim, and schedules indefinite exponential backoff capped at five minutes | Interruption preserves the interrupt, consumes no retry, leaves `PROCESSING` ownership for lease recovery, and stops the batch |
 | UC-06 | Implemented contract | UC-04 sends `TRANSACTION_CREATED` to `payments.transactions.created` | Kafka receives transaction ID as key and a schema-version-2 envelope with producer, event identity/time, and canonical V2 body | Delivery is at least once; external consumers, not this service, must validate the version and deduplicate on `eventId`; already-published V1 events may remain on the topic |
-| UC-07 | Implemented | Probe calls `/actuator/health` or operator calls `/actuator/outbox` | Basic application health remains independent; outbox status separately reports pending, processing, and quarantined counts plus oldest publishable/quarantined ages | Compose readiness can be `UP` during broker backlog or quarantine by design; alert routing and thresholds remain planned |
+| UC-07 | Implemented | Probe calls `/actuator/health` or operator calls `/actuator/outbox` | Basic application health remains independent; one point-in-time aggregate reports pending, processing, and quarantined counts; publishable age uses event creation and quarantine age uses quarantine time | Compose readiness can be `UP` during broker backlog or quarantine by design; alert routing and thresholds remain planned |
 | UC-08 | Implemented | Local database operator queries PostgreSQL directly | Retained mutable rows expose publishable, published, and quarantined status plus retry/error/claim/quarantine evidence for diagnosis | This is operational history, not tamper-evident audit storage; no operator mutation API, quarantine-release workflow, or archival job exists |
-| UC-09 | Implemented | Client calls a retired `/api/v1/transactions` route | Returns `410 Gone`, a stable problem type, and a V2 successor link without binding the old request | No transaction/outbox row is created and V1 is never silently interpreted as V2 |
-| UC-10 | Implemented | Flyway V6 finds a pre-V2 `PENDING`, `PROCESSING`, or `FAILED` outbox row | Preserves payload and diagnostics, clears stale claims, records prior status/reason/time, and sets `QUARANTINED` | Published rows remain unchanged; the ordinary claim query cannot select quarantined rows; authenticated review/replay is planned |
+| UC-09 | Implemented | Client calls a retired V1 create, normalize, or GET-by-ID route | Returns `410 Gone`, a stable problem type, and the exact V2 collection, normalize, or same-ID successor without binding the old request | No transaction/outbox row is created and V1 is never silently interpreted as V2 |
+| UC-10 | Implemented | Deployment operator stops writers, snapshots the database, and runs the read-only V7 preflight before Flyway | A zero historical-unpublished count permits the byte-compatible V6-to-V7 upgrade; V7 installs quarantine evidence/constraints/index without rewriting V1-V6 | A nonzero count must be drained by the compatible publisher or release remains blocked; V7 can quarantine remaining post-V6 `PENDING`/`PROCESSING` rows as containment, but that does not complete historical delivery and UC-P08 is still required |
 
 ## Implemented engineering use cases
 
@@ -86,6 +88,7 @@ flowchart LR
         eng04(["ENG-04 Run mixed smoke traffic"])
         eng05(["ENG-05 Run concurrent load traffic"])
         eng06(["ENG-06 Execute CI quality gates"])
+        eng07(["ENG-07 Run migration release gates"])
     end
 
     developer --> eng01
@@ -93,6 +96,7 @@ flowchart LR
     developer --> eng03
     developer --> eng04
     developer --> eng05
+    developer --> eng07
     ci --> eng06
     eng06 --> eng01
     eng06 --> eng03
@@ -100,7 +104,7 @@ flowchart LR
     eng06 --> eng05
 
     classDef implemented fill:#e8f5e9,stroke:#2e7d32,color:#1b5e20;
-    class eng01,eng02,eng03,eng04,eng05,eng06 implemented;
+    class eng01,eng02,eng03,eng04,eng05,eng06,eng07 implemented;
 ```
 
 | ID | Interface | Verified outcome |
@@ -111,6 +115,7 @@ flowchart LR
 | ENG-04 | `make traffic` | Expected `2xx`, `400`, `409`, `410`, and `422` responses occur; retired V1 creates no state; exact HTTP/DB/outbox/Kafka contracts correlate for every successful V2 create |
 | ENG-05 | `make load-test` | Concurrent valid/invalid traffic satisfies configurable throughput and p95 bounds, expected statuses, and exact pipeline checks; the result is local acceptance evidence, not capacity |
 | ENG-06 | `.github/workflows/ci.yml` | SHA-pinned static/docs, test/coverage, build, and E2E/load gates run for `main` PRs and `main`/`tgusain/**` pushes; dependency review additionally gates PRs |
+| ENG-07 | `make migration-preflight`, `make migration-v7-preflight` | Read-only repeatable-read reports expose identity/currency collisions and historical unpublished events; operators retain the worklists and enforce their documented zero-count gates before release |
 
 ## Planned next-phase use cases
 
@@ -178,7 +183,7 @@ Every use case above is represented in
 | UC-04, UC-05, UC-06 | Claim, deliver, or recover an outbox event; claim disjoint concurrent work |
 | UC-07, UC-08 | Report application/delivery/quarantine status; inspect retained operational history |
 | UC-09 | Reject retired API V1 explicitly |
-| UC-10 | Quarantine pre-V2 unpublished events |
+| UC-10, ENG-07 | Gate and quarantine pre-V2 unpublished events |
 | ENG-01, ENG-02 | Build and run the local stack |
 | ENG-03, ENG-06 | Execute local and CI quality gates |
 | ENG-04, ENG-05 | Verify smoke and concurrent load traffic |

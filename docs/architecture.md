@@ -4,6 +4,8 @@
 
 - [V2 versioning decision](decisions/0002-api-event-versioning.md) — governing
   API/event versions, V1 retirement, and historical-payload quarantine.
+- [Forward-only migration decision](decisions/0003-forward-only-flyway-upgrades.md)
+  — immutable applied migrations, release gating, and V6-to-V7 upgrade support.
 - [Ingestion contract decision](decisions/0001-v1-ingestion-contract.md) —
   money, identity, ownership, idempotency, metadata, migration, normalization,
   and outbox rules adopted by V2.
@@ -38,8 +40,8 @@ The active routes are `/api/v2/transactions` and
 `/api/v2/transactions/normalize`. The strict request contract requires
 `sourceSystem`, reserves ID/status/receipt time for the server, and is not
 backward compatible with the earlier V1 prototype. V1 routes therefore return
-an explicit `410 Gone` and successor link without binding the request or
-touching durable state.
+an explicit `410 Gone` and operation-specific successor link without binding
+the request or touching durable state.
 
 New `TRANSACTION_CREATED` records use `schemaVersion=2` on the existing
 `payments.transactions.created` topic. V2 adds the producer envelope and the
@@ -72,18 +74,25 @@ They never strand a V2 event in a terminal application state. An interrupted
 sender preserves the thread interrupt and leaves its event `PROCESSING` without
 consuming a retry; lease expiry returns ownership to a worker.
 
-Migration V6 treats every pre-V2 unpublished `PENDING`, `PROCESSING`, or
-`FAILED` row as unverified. It preserves the stored payload, retry evidence, and
-prior status; clears any stale claim; and moves the row to `QUARANTINED` with a
-reason and timestamp. The claim query cannot select that status. This prevents
-an old payload from being advertised as V2 or silently transformed. Published
-historical rows remain published. Controlled compatibility review/replay is a
-planned operator workflow, not an automatic migration action.
+Applied migrations V1-V6 remain byte-for-byte identical to artifact `1d9d97c`.
+The forward-only V7 migration treats every pre-V2 unpublished `PENDING` or
+`PROCESSING` row as unverified; V6 has already converted historical `FAILED`
+rows to `PENDING`. V7 preserves the stored payload, retry/error evidence, and
+post-V6 state; clears any stale claim; and moves the row to `QUARANTINED` with a
+reason and timestamp. The claim query cannot select that status. Published
+historical rows remain published.
 
-A V6 database constraint also requires `payload.schemaVersion` to be `2` while
-a row is `PENDING` or `PROCESSING`. Therefore an old writer cannot create fresh
-claimable V1 work after V6, and clearing quarantine fields is insufficient to
-release a legacy payload.
+This is containment, not historical delivery recovery. Production release
+requires the pre-V7 unpublished count to be zero, either initially or after the
+compatible old publisher drains it. Otherwise release remains blocked until the
+planned authenticated compatibility/replacement workflow resolves every row.
+
+A V7 database constraint requires the JSON value at `payload.schemaVersion` to
+be numeric `2` while a row is `PENDING` or `PROCESSING`. This is only a
+publishability discriminator: a body such as `{"schemaVersion":2}` passes that
+one check and is not thereby a conforming V2 envelope. Ordinary application
+writes are serialized to the complete contract; consumers must still validate
+the complete body.
 
 ## Concurrency
 
@@ -113,11 +122,13 @@ create endpoint and can be submitted unchanged. It:
 ## Verification strategy
 
 Fast unit tests isolate normalization, transaction creation, and outbox retry
-logic. A separate Testcontainers suite exercises the HTTP boundary, Flyway
-migrations, PostgreSQL constraints and persistence, scheduled outbox delivery,
-and Kafka consumption together. A compatibility integration test migrates a
-realistic V1 envelope, starts the production scheduler against Kafka, proves the
-old event stays quarantined, and proves a new schema-V2 event is delivered.
+logic and pin SHA-256 digests for every already-applied V1-V6 migration. A
+separate Testcontainers suite exercises the HTTP boundary, Flyway migrations,
+PostgreSQL constraints and persistence, scheduled outbox delivery, and Kafka
+consumption together. A compatibility integration test creates a populated
+canonical V6 database, applies V7, starts the production scheduler against
+Kafka, proves the old event stays quarantined, and proves a new schema-V2 event
+is delivered.
 
 The repository-level traffic simulator covers the packaged Compose topology. It
 sends expected successes and failures under sequential or concurrent load, then
@@ -129,10 +140,11 @@ envelope, and single creation identity while allowing repeats of that same event
 identity. Configurable local throughput and p95 bounds make load mode a bounded
 acceptance scenario, not a capacity claim.
 
-`GET /actuator/outbox` reports pending, processing, and quarantined counts plus
-the oldest publishable and quarantined ages without changing ordinary
-`/actuator/health`. It enables separate delivery and compatibility-review alarm
-signals, but this repository does not configure an alert backend.
+`GET /actuator/outbox` reads pending, processing, and quarantined counts plus
+both oldest timestamps in one PostgreSQL aggregate statement. Publishable age
+uses `created_at`; quarantine age uses `quarantined_at`. The V7 partial index
+supports retained-quarantine inspection. The endpoint does not change ordinary
+`/actuator/health` and this repository does not configure an alert backend.
 
 ## Current production-readiness limits
 
@@ -141,6 +153,9 @@ signals, but this repository does not configure an alert backend.
 - Flyway runs synchronously at startup. The documented upgrade procedure stops
   writers and pollers; no expand/contract, rolling, or zero-downtime migration
   path is implemented.
+- A nonzero historical-unpublished/quarantine count means historical event
+  delivery is unresolved. V7 prevents unsafe publication but does not satisfy
+  the transaction-to-event promise for those rows.
 - The local load thresholds are functional acceptance bounds only. They do not
   establish capacity, production SLOs, degraded-dependency behavior, HA, or DR.
 - The reference-canonicalization table rejects ordinary row-level insert,
