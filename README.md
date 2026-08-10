@@ -88,7 +88,7 @@ runs. `make reset` explicitly deletes both local volumes.
 | `make lint` | Run Checkstyle and compile-check the Python support scripts |
 | `make docs-lint` | Validate Markdown, links, traceability, and Mermaid syntax |
 | `make migration-preflight` | Produce the read-only V2-to-V3 reconciliation worklist |
-| `make migration-v7-preflight` | Gate V7 on the historical unpublished-event count |
+| `make migration-v7-preflight` | Fail unless the database is exact canonical V6 with zero unpublished events |
 | `make traffic` | Start the stack and run the mixed end-to-end smoke scenario |
 | `make load-test` | Run configurable concurrent traffic with local acceptance bounds |
 | `make check` | Run static/docs checks, all tests, coverage, and the build |
@@ -279,9 +279,11 @@ merged, renamed, deleted, moved, or selected as a winner.
 
 Before applying V7, stop writers and pollers, then run
 `make migration-v7-preflight` and follow the
-[V7 event-quarantine runbook](docs/migrations/v7-event-quarantine.md). A zero
-historical-unpublished count permits release. A nonzero count must be drained by
-the compatible old publisher or remains an explicit release blocker until the
+[V7 event-quarantine runbook](docs/migrations/v7-event-quarantine.md). The
+command exits successfully only for the exact canonical V1-V6 Flyway history
+and a zero historical-unpublished count. A different/already-upgraded lineage
+or nonzero count exits nonzero. Unpublished rows must be drained by the
+compatible old publisher or remain an explicit release blocker until the
 controlled UC-P08 workflow exists; quarantine alone is containment, not
 delivery completion.
 

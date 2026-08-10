@@ -31,19 +31,31 @@ forward migration. Do not delete, merge, or silently select historical records.
    make migration-v7-preflight
    ```
 
-4. Retain the event-level worklist as deployment evidence. The reported
-   `unresolved_historical_unpublished_events` count must be zero before the V2
-   release can claim that every committed historical transaction completed its
-   event-delivery promise.
+4. Retain the event-level worklist as deployment evidence. The command returns
+   zero only when `flyway_schema_history` contains exactly the canonical V1-V6
+   filenames and checksums and the reported
+   `unresolved_historical_unpublished_events` count is zero. Missing, changed,
+   failed, extra, or already-applied migrations and every nonzero event count
+   make the process exit nonzero.
 
 If the count is nonzero, either drain the rows with the compatible pre-V2
 publisher before upgrading, or delay release until UC-P08 provides a reviewed
-compatibility/replacement workflow. Applying V7 with a nonzero count is allowed
-only as fail-safe containment: it strands those rows in `QUARANTINED`, so the
+compatibility/replacement workflow. The executable gate does not approve V7 in
+that state. A separately authorized emergency decision may still apply V7 only
+as fail-safe containment, but it strands those rows in `QUARANTINED`; the
 release remains operationally incomplete until every row is resolved.
+
+Do not rerun this pre-V7 command as a post-migration check: it deliberately
+rejects a database whose history includes V7, even if quarantine makes the old
+unpublished predicate empty. Use the post-migration queries below instead.
 
 This service runs Flyway synchronously at startup. The procedure requires
 stopped writers and pollers; it is not a rolling or zero-downtime plan.
+
+`V7PreflightIT` copies and executes this exact SQL file inside PostgreSQL 17. It
+asserts success for an empty canonical V6 database, failure for a changed
+recorded checksum, failure for one unresolved historical event, and failure
+after V7 has been applied.
 
 ## Migration behavior
 

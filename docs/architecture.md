@@ -128,7 +128,10 @@ PostgreSQL constraints and persistence, scheduled outbox delivery, and Kafka
 consumption together. A compatibility integration test creates a populated
 canonical V6 database, applies V7, starts the production scheduler against
 Kafka, proves the old event stays quarantined, and proves a new schema-V2 event
-is delivered.
+is delivered. The exact V7 preflight script is also run against an empty
+canonical V6 database, a V6 database with an unresolved event, and an already
+upgraded V7 database to prove its process exit fails closed. It also changes a
+recorded V3 checksum and proves the lineage check rejects it.
 
 The repository-level traffic simulator covers the packaged Compose topology. It
 sends expected successes and failures under sequential or concurrent load, then
@@ -142,9 +145,13 @@ acceptance scenario, not a capacity claim.
 
 `GET /actuator/outbox` reads pending, processing, and quarantined counts plus
 both oldest timestamps in one PostgreSQL aggregate statement. Publishable age
-uses `created_at`; quarantine age uses `quarantined_at`. The V7 partial index
-supports retained-quarantine inspection. The endpoint does not change ordinary
-`/actuator/health` and this repository does not configure an alert backend.
+uses `created_at`; quarantine age uses `quarantined_at`. Its outer predicate
+uses explicit status-equality branches so PostgreSQL can combine the three
+partial indexes. An integration fixture with 200,000 retained `PUBLISHED` rows
+and 100 rows in each active state requires a `BitmapOr` plan and rejects an
+outbox sequential scan. This is a regression bound, not a latency or capacity
+claim. The endpoint does not change ordinary `/actuator/health`, and this
+repository does not configure an alert backend.
 
 ## Current production-readiness limits
 

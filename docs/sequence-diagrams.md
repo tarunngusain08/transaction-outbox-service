@@ -264,30 +264,41 @@ sequenceDiagram
     Operator->>Writers: Stop every writer and poller
     Operator->>DB: Take restorable snapshot and capture Flyway history
     Operator->>Make: Run read-only repeatable-read preflight
-    Make->>DB: Count and inventory PENDING / PROCESSING / FAILED
-    DB-->>Operator: Worklist plus unresolved historical count
-    alt Count is zero
-        Operator->>Flyway: Validate immutable V1-V6 and apply V7
-        Flyway->>DB: Add quarantine evidence, discriminator constraint, and index
-        Flyway->>DB: Commit forward-only schema changes
-        Operator->>Writers: Start V2 application after verification
-    else Count is nonzero and can be drained
-        Operator->>OldPublisher: Start compatible publisher under controlled change
-        OldPublisher->>Kafka: Deliver historical payloads
-        OldPublisher->>DB: Record acknowledged rows PUBLISHED
-        Operator->>Writers: Stop old publisher, rerun preflight until zero
-        Operator->>Flyway: Apply V7 only after gate passes
-        Operator->>Writers: Start V2 application after verification
-    else Count is nonzero and cannot be drained
-        Operator->>Flyway: Optionally apply V7 for fail-safe containment
-        Flyway->>DB: Move post-V6 PENDING / PROCESSING to QUARANTINED
-        Flyway->>DB: Preserve payload/diagnostics and clear claims
-        Note over Operator,DB: Release remains incomplete until UC-P08 resolves every row
+    Make->>DB: Match exact canonical V1-V6 scripts and checksums
+    alt Lineage is missing, changed, extra, or already at V7
+        DB-->>Make: Reject migration state
+        Make-->>Operator: Exit nonzero without approving release
+    else Lineage is exact canonical V6
+        Make->>DB: Count and inventory PENDING / PROCESSING / FAILED
+        DB-->>Operator: Worklist plus unresolved historical count
+        alt Count is zero
+            Make-->>Operator: Exit zero
+            Operator->>Flyway: Apply V7
+            Flyway->>DB: Add quarantine evidence, discriminator constraint, and index
+            Flyway->>DB: Commit forward-only schema changes
+            Operator->>Writers: Start V2 application after verification
+        else Count is nonzero and can be drained
+            Make-->>Operator: Exit nonzero
+            Operator->>OldPublisher: Start compatible publisher under controlled change
+            OldPublisher->>Kafka: Deliver historical payloads
+            OldPublisher->>DB: Record acknowledged rows PUBLISHED
+            Operator->>Writers: Stop old publisher, rerun preflight until zero
+            Operator->>Flyway: Apply V7 only after gate passes
+            Operator->>Writers: Start V2 application after verification
+        else Count is nonzero and cannot be drained
+            Make-->>Operator: Exit nonzero
+            Operator->>Flyway: Separately authorize V7 only for fail-safe containment
+            Flyway->>DB: Move post-V6 PENDING / PROCESSING to QUARANTINED
+            Flyway->>DB: Preserve payload/diagnostics and clear claims
+            Note over Operator,DB: Release remains incomplete until UC-P08 resolves every row
+        end
     end
-    Publisher->>DB: Claim only due PENDING or expired PROCESSING
-    DB-->>Publisher: New V2 event or empty, never QUARANTINED
-    Publisher->>Kafka: Publish only when a claimable V2 event exists
-    Note over DB,Kafka: Numeric schemaVersion 2 is only a discriminator, and consumers validate the full envelope
+    opt Only after a successful V2 release
+        Publisher->>DB: Claim only due PENDING or expired PROCESSING
+        DB-->>Publisher: New V2 event or empty, never QUARANTINED
+        Publisher->>Kafka: Publish only when a claimable V2 event exists
+        Note over DB,Kafka: Numeric schemaVersion 2 is only a discriminator, and consumers validate the full envelope
+    end
 ```
 
 ### UC-04 — Claim disjoint work across concurrent pollers

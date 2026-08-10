@@ -26,8 +26,9 @@ observability cannot be inferred reliably.
 2. The retired `/api/v1/transactions` routes return `410 Gone`, a stable problem
    type, and an operation-specific successor link: create maps to the V2
    collection, normalize retains `/normalize`, and GET-by-ID retains the same
-   transaction ID. The service does not bind a V1 body, create state, or guess a
-   V2 request.
+   raw path segment. The retired GET handler does not parse that segment as a
+   UUID, so valid and malformed V1 identifiers both receive `410`. The service
+   does not bind a V1 body, create state, or guess a V2 request.
 3. Newly created `TRANSACTION_CREATED` envelopes advertise `schemaVersion=2`
    and retain the `producer` field. The topic remains
    `payments.transactions.created`; consumers must branch on and validate the
