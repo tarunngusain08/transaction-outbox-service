@@ -111,6 +111,13 @@ class HistoricalOutboxCompatibilityIT {
                 });
             });
 
+            var deliveryState = outboxRepository.summarizeDeliveryState();
+            assertThat(deliveryState.getPending()).isZero();
+            assertThat(deliveryState.getProcessing()).isZero();
+            assertThat(deliveryState.getQuarantined()).isOne();
+            assertThat(deliveryState.getOldestUnpublishedAt()).isNull();
+            assertThat(deliveryState.getOldestQuarantinedAt()).isNotNull();
+
             var currentEvent = outboxRepository.findAll().stream()
                     .filter(event -> event.getAggregateId().equals(currentTransactionId))
                     .findFirst()

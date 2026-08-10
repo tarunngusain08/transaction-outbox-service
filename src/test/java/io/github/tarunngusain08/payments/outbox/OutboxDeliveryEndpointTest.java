@@ -5,10 +5,11 @@ import org.junit.jupiter.api.Test;
 import java.time.Clock;
 import java.time.Instant;
 import java.time.ZoneOffset;
-import java.util.List;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoMoreInteractions;
 import static org.mockito.Mockito.when;
 
 class OutboxDeliveryEndpointTest {
@@ -18,16 +19,13 @@ class OutboxDeliveryEndpointTest {
     @Test
     void reportsRecoverableBacklogSeparatelyFromApplicationHealth() {
         var repository = mock(OutboxEventRepository.class);
-        when(repository.countByStatus(OutboxStatus.PENDING)).thenReturn(3L);
-        when(repository.countByStatus(OutboxStatus.PROCESSING)).thenReturn(2L);
-        when(repository.countByStatus(OutboxStatus.QUARANTINED)).thenReturn(1L);
-        when(repository.findOldestCreatedAtByStatusIn(List.of(
-                OutboxStatus.PENDING,
-                OutboxStatus.PROCESSING
-        ))).thenReturn(NOW.minusSeconds(90));
-        when(repository.findOldestCreatedAtByStatusIn(List.of(
-                OutboxStatus.QUARANTINED
-        ))).thenReturn(NOW.minusSeconds(3_600));
+        var state = mock(OutboxDeliveryState.class);
+        when(repository.summarizeDeliveryState()).thenReturn(state);
+        when(state.getPending()).thenReturn(3L);
+        when(state.getProcessing()).thenReturn(2L);
+        when(state.getQuarantined()).thenReturn(1L);
+        when(state.getOldestUnpublishedAt()).thenReturn(NOW.minusSeconds(90));
+        when(state.getOldestQuarantinedAt()).thenReturn(NOW.minusSeconds(3_600));
         var endpoint = new OutboxDeliveryEndpoint(
                 repository,
                 Clock.fixed(NOW, ZoneOffset.UTC)
@@ -41,5 +39,7 @@ class OutboxDeliveryEndpointTest {
         assertThat(snapshot.oldestUnpublishedAgeSeconds()).isEqualTo(90);
         assertThat(snapshot.oldestQuarantinedAgeSeconds()).isEqualTo(3_600);
         assertThat(snapshot.checkedAt()).isEqualTo(NOW);
+        verify(repository).summarizeDeliveryState();
+        verifyNoMoreInteractions(repository);
     }
 }
