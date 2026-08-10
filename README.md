@@ -190,11 +190,14 @@ make traffic
 ```
 
 It sends successful creates and normalization requests together with deliberate
-replay, conflict, validation, and normalization failures. It then queries
-PostgreSQL, waits for every matching row to become `PUBLISHED`, and validates
-the exact Kafka key, version-1 envelope fields, timestamp, event identity, and
-canonical transaction payload. Legitimate repeats of the same `eventId` are allowed by
-the at-least-once contract; contradictory creation IDs are rejected.
+replay, conflict, validation, and normalization failures. The successful
+normalization body is also submitted unchanged to the create endpoint. The
+simulator then reads every full transaction row, durable request fingerprint,
+outbox row, and stored outbox payload for its unique prefix. It correlates those
+values field by field with the HTTP response, Kafka key, event ID, and Kafka
+body. Legitimate repeats of the same `eventId` are allowed by the at-least-once
+contract; missing records, extra records, divergent payloads, and contradictory
+creation IDs are rejected.
 
 Run a larger concurrent scenario by overriding the defaults:
 

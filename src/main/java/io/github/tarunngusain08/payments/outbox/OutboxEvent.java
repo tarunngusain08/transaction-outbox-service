@@ -129,8 +129,16 @@ public class OutboxEvent {
         return id;
     }
 
+    public String getAggregateType() {
+        return aggregateType;
+    }
+
     public UUID getAggregateId() {
         return aggregateId;
+    }
+
+    public String getEventType() {
+        return eventType;
     }
 
     public String getPayload() {
@@ -139,6 +147,10 @@ public class OutboxEvent {
 
     public OutboxStatus getStatus() {
         return status;
+    }
+
+    public Instant getCreatedAt() {
+        return createdAt;
     }
 
     public Instant getPublishedAt() {

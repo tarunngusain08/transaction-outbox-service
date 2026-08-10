@@ -399,12 +399,14 @@ sequenceDiagram
         Simulator->>API: Duplicate probe and normalization probe
     end
     API-->>Simulator: Expected 2xx and intentional 4xx responses
+    Simulator->>API: Submit successful normalized body unchanged to create
+    API-->>Simulator: Canonical transaction with server-owned fields
     Poller->>Kafka: Publish successful create events asynchronously
-    Simulator->>DB: Poll exact prefix counts and PUBLISHED outbox counts
-    DB-->>Simulator: Expected records and events settled
+    Simulator->>DB: Read full transaction, fingerprint, outbox row, and stored payload by exact prefix
+    DB-->>Simulator: Every expected row is PUBLISHED and no extra or duplicate row exists
     Simulator->>Kafka: Consume keys and values from beginning, then filter unique prefix
     Kafka-->>Simulator: Matching versioned TRANSACTION_CREATED occurrences
-    Simulator->>Simulator: Validate key, envelope, event ID, and exact canonical body
+    Simulator->>Simulator: Correlate every HTTP, DB, outbox payload, Kafka key, event ID, and body field
     Simulator->>Simulator: Permit same-event repeats and reject contradictory creation IDs
     Simulator->>Simulator: Enforce expected statuses and configurable load bounds
     Simulator-->>Initiator: Exit 0 on complete match and non-zero on any mismatch

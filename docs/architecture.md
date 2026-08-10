@@ -92,11 +92,13 @@ and Kafka consumption together.
 
 The repository-level traffic simulator covers the packaged Compose topology. It
 sends expected successes and failures under sequential or concurrent load, then
-correlates its unique run prefix across `transactions`, published
-`outbox_events`, and consumed Kafka messages. It checks the Kafka key, envelope,
-single creation identity, and complete canonical body while allowing repeats of
-that same event identity. Configurable local throughput and p95 bounds make load
-mode a bounded acceptance scenario, not a capacity claim.
+submits successful normalized output unchanged to creation and correlates its
+unique run prefix across the full HTTP response, `transactions` row and durable
+fingerprint, published `outbox_events` row and stored payload, and consumed Kafka
+record. It checks every canonical field, timestamp relationship, Kafka key,
+envelope, and single creation identity while allowing repeats of that same event
+identity. Configurable local throughput and p95 bounds make load mode a bounded
+acceptance scenario, not a capacity claim.
 
 `GET /actuator/outbox` reports pending and processing counts plus oldest
 unpublished age without changing ordinary `/actuator/health`. It enables a

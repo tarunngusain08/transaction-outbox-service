@@ -131,13 +131,32 @@ class TransactionPipelineIT {
             assertThat(outboxEvents.getFirst().getPublishedAt()).isNotNull();
         });
 
-        String kafkaPayload = consumeEvent(externalReference);
-        var event = objectMapper.readTree(kafkaPayload);
-        assertThat(event.path("eventType").asString()).isEqualTo("TRANSACTION_CREATED");
-        assertThat(event.path("schemaVersion").asInt()).isEqualTo(1);
-        assertThat(event.path("producer").asString()).isEqualTo("transaction-outbox-service");
-        assertThat(event.path("transaction").path("transactionId").asString())
-                .isEqualTo(transaction.transactionId().toString());
+        var outboxEvent = outboxRepository.findAll().getFirst();
+        assertThat(outboxEvent.getAggregateType()).isEqualTo("TRANSACTION");
+        assertThat(outboxEvent.getAggregateId()).isEqualTo(transaction.transactionId());
+        assertThat(outboxEvent.getEventType()).isEqualTo(TransactionCreatedEvent.EVENT_TYPE);
+        assertThat(outboxEvent.getCreatedAt()).isEqualTo(transaction.receivedAt());
+        assertThat(outboxEvent.getNextAttemptAt()).isEqualTo(outboxEvent.getCreatedAt());
+        assertThat(outboxEvent.getRetryCount()).isZero();
+        assertThat(outboxEvent.getLastError()).isNull();
+        assertThat(outboxEvent.getClaimToken()).isNull();
+        assertThat(outboxEvent.getClaimedAt()).isNull();
+
+        var storedEvent = objectMapper.readValue(
+                outboxEvent.getPayload(),
+                TransactionCreatedEvent.class
+        );
+        assertThat(storedEvent.schemaVersion()).isEqualTo(TransactionCreatedEvent.SCHEMA_VERSION);
+        assertThat(storedEvent.producer()).isEqualTo(TransactionCreatedEvent.PRODUCER);
+        assertThat(storedEvent.eventId()).isEqualTo(outboxEvent.getId());
+        assertThat(storedEvent.eventType()).isEqualTo(outboxEvent.getEventType());
+        assertThat(storedEvent.occurredAt()).isEqualTo(outboxEvent.getCreatedAt());
+        assertThat(storedEvent.transaction()).isEqualTo(transaction);
+
+        var kafkaRecord = consumeEvent(externalReference);
+        assertThat(kafkaRecord.key()).isEqualTo(transaction.transactionId().toString());
+        assertThat(objectMapper.readTree(kafkaRecord.value()))
+                .isEqualTo(objectMapper.readTree(outboxEvent.getPayload()));
 
         var outboxSnapshot = get("/actuator/outbox");
         assertThat(outboxSnapshot.statusCode()).isEqualTo(HttpStatus.OK.value());
@@ -475,7 +494,7 @@ class TransactionPipelineIT {
         return httpClient.send(request, HttpResponse.BodyHandlers.ofString());
     }
 
-    private String consumeEvent(String externalReference) {
+    private ConsumedKafkaRecord consumeEvent(String externalReference) {
         var properties = new Properties();
         properties.put(ConsumerConfig.BOOTSTRAP_SERVERS_CONFIG, KAFKA.getBootstrapServers());
         properties.put(ConsumerConfig.GROUP_ID_CONFIG, "pipeline-it-" + UUID.randomUUID());
@@ -489,8 +508,10 @@ class TransactionPipelineIT {
 
             while (Instant.now().isBefore(deadline)) {
                 for (var record : consumer.poll(Duration.ofMillis(500))) {
-                    if (record.value().contains(externalReference)) {
-                        return record.value();
+                    var event = objectMapper.readTree(record.value());
+                    if (event.path("transaction").path("externalReference")
+                            .asString().equals(externalReference)) {
+                        return new ConsumedKafkaRecord(record.key(), record.value());
                     }
                 }
             }
@@ -548,5 +569,8 @@ class TransactionPipelineIT {
                   "remarks": "Integration test"
                 }
                 """;
+    }
+
+    private record ConsumedKafkaRecord(String key, String value) {
     }
 }
