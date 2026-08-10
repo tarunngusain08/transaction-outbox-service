@@ -111,10 +111,12 @@ class TransactionPipelineIT {
     void createsTransactionAndPublishesStoredOutboxPayloadToKafka() throws Exception {
         String externalReference = "IT-SUCCESS-" + UUID.randomUUID();
 
-        var response = post("/api/v1/transactions", canonicalRequest(externalReference));
+        var response = post("/api/v2/transactions", canonicalRequest(externalReference));
 
         assertThat(response.statusCode()).isEqualTo(HttpStatus.CREATED.value());
         var transaction = objectMapper.readValue(response.body(), TransactionResponse.class);
+        assertThat(response.headers().firstValue("Location"))
+                .contains("/api/v2/transactions/" + transaction.transactionId());
         assertThat(transaction.sourceSystem()).isEqualTo("DIRECT_API");
         assertThat(transaction.externalReference()).isEqualTo(externalReference);
         assertThat(transaction.amount()).isEqualTo(150_000L);
@@ -163,22 +165,44 @@ class TransactionPipelineIT {
         var snapshot = objectMapper.readTree(outboxSnapshot.body());
         assertThat(snapshot.path("pending").asLong()).isZero();
         assertThat(snapshot.path("processing").asLong()).isZero();
+        assertThat(snapshot.path("quarantined").asLong()).isZero();
         assertThat(snapshot.has("failed")).isFalse();
+    }
+
+    @Test
+    void explicitlyRetiresEveryV1RouteWithoutCreatingDurableState() throws Exception {
+        var responses = List.of(
+                post("/api/v1/transactions", historicalV1Request()),
+                post("/api/v1/transactions/normalize", legacyRequest()),
+                get("/api/v1/transactions/" + UUID.randomUUID())
+        );
+
+        for (var response : responses) {
+            assertThat(response.statusCode()).isEqualTo(HttpStatus.GONE.value());
+            assertThat(response.headers().firstValue("Link"))
+                    .contains("</api/v2/transactions>; rel=\"successor-version\"");
+            var problem = objectMapper.readTree(response.body());
+            assertThat(problem.path("type").asText())
+                    .isEqualTo("urn:transaction-outbox-service:api-version-retired");
+            assertThat(problem.path("successor").asText()).isEqualTo("/api/v2/transactions");
+        }
+        assertThat(transactionRepository.count()).isZero();
+        assertThat(outboxRepository.count()).isZero();
     }
 
     @Test
     void returnsExpectedErrorsWithoutAddingExtraRows() throws Exception {
         String externalReference = "IT-FAILURE-" + UUID.randomUUID();
 
-        assertThat(post("/api/v1/transactions", canonicalRequest(externalReference)).statusCode())
+        assertThat(post("/api/v2/transactions", canonicalRequest(externalReference)).statusCode())
                 .isEqualTo(HttpStatus.CREATED.value());
-        assertThat(post("/api/v1/transactions", canonicalRequest(externalReference)).statusCode())
+        assertThat(post("/api/v2/transactions", canonicalRequest(externalReference)).statusCode())
                 .isEqualTo(HttpStatus.OK.value());
         assertThat(post(
-                "/api/v1/transactions",
+                "/api/v2/transactions",
                 canonicalRequest(externalReference).replace("150000", "999")
         ).statusCode()).isEqualTo(HttpStatus.CONFLICT.value());
-        assertThat(post("/api/v1/transactions", invalidCanonicalRequest()).statusCode())
+        assertThat(post("/api/v2/transactions", invalidCanonicalRequest()).statusCode())
                 .isEqualTo(HttpStatus.BAD_REQUEST.value());
 
         await().atMost(Duration.ofSeconds(15)).untilAsserted(() ->
@@ -206,7 +230,7 @@ class TransactionPipelineIT {
                     if (!start.await(5, TimeUnit.SECONDS)) {
                         throw new IllegalStateException("concurrent create start gate timed out");
                     }
-                    return post("/api/v1/transactions", request);
+                    return post("/api/v2/transactions", request);
                 }));
             }
 
@@ -286,9 +310,9 @@ class TransactionPipelineIT {
         String directRequest = canonicalRequest("DIRECT_API", externalReference);
         String partnerRequest = canonicalRequest("PARTNER_BANK", externalReference);
 
-        assertThat(post("/api/v1/transactions", directRequest).statusCode())
+        assertThat(post("/api/v2/transactions", directRequest).statusCode())
                 .isEqualTo(HttpStatus.CREATED.value());
-        assertThat(post("/api/v1/transactions", partnerRequest).statusCode())
+        assertThat(post("/api/v2/transactions", partnerRequest).statusCode())
                 .isEqualTo(HttpStatus.CREATED.value());
         assertThat(transactionRepository.count()).isEqualTo(2);
         assertThat(outboxRepository.count()).isEqualTo(2);
@@ -296,7 +320,7 @@ class TransactionPipelineIT {
 
     @Test
     void normalizesLegacyPayloadAndSubmitsTheResponseUnchangedToCreate() throws Exception {
-        var response = post("/api/v1/transactions/normalize", legacyRequest());
+        var response = post("/api/v2/transactions/normalize", legacyRequest());
 
         assertThat(response.statusCode()).isEqualTo(HttpStatus.OK.value());
         var normalized = objectMapper.readValue(response.body(), CreateTransactionRequest.class);
@@ -305,7 +329,7 @@ class TransactionPipelineIT {
         assertThat(normalized.createdAt()).isEqualTo(Instant.parse("2026-08-08T09:02:11Z"));
         assertThat(normalized.metadata()).containsEntry("payerIfsc", "HDFC0001234");
 
-        var created = post("/api/v1/transactions", response.body());
+        var created = post("/api/v2/transactions", response.body());
         assertThat(created.statusCode()).isEqualTo(HttpStatus.CREATED.value());
         var transaction = objectMapper.readValue(created.body(), TransactionResponse.class);
         assertThat(transaction.sourceSystem()).isEqualTo(normalized.sourceSystem());
@@ -324,7 +348,7 @@ class TransactionPipelineIT {
                 .serialize(any(TransactionCreatedEvent.class));
 
         var response = post(
-                "/api/v1/transactions",
+                "/api/v2/transactions",
                 canonicalRequest("IT-ROLLBACK-" + UUID.randomUUID())
         );
 
@@ -353,7 +377,7 @@ class TransactionPipelineIT {
         );
 
         for (String request : invalidRequests) {
-            assertThat(post("/api/v1/transactions", request).statusCode())
+            assertThat(post("/api/v2/transactions", request).statusCode())
                     .isEqualTo(HttpStatus.BAD_REQUEST.value());
         }
         assertThat(transactionRepository.count()).isZero();
@@ -403,7 +427,7 @@ class TransactionPipelineIT {
         );
 
         for (String request : invalidRequests) {
-            assertThat(post("/api/v1/transactions", request).statusCode())
+            assertThat(post("/api/v2/transactions", request).statusCode())
                     .as("request must be rejected: %s", request.substring(0, Math.min(120, request.length())))
                     .isEqualTo(HttpStatus.BAD_REQUEST.value());
         }
@@ -415,7 +439,7 @@ class TransactionPipelineIT {
     @Test
     void rejectsExtremeLegacyScalarsBeforeNormalization() throws Exception {
         var response = post(
-                "/api/v1/transactions/normalize",
+                "/api/v2/transactions/normalize",
                 legacyRequest().replace("1500.00", "1e2147483647")
         );
 
@@ -429,11 +453,11 @@ class TransactionPipelineIT {
         String canonicalReference = "IT-SPACE-" + UUID.randomUUID();
 
         assertThat(post(
-                "/api/v1/transactions",
+                "/api/v2/transactions",
                 canonicalRequest("  " + canonicalReference + "  ")
         ).statusCode()).isEqualTo(HttpStatus.BAD_REQUEST.value());
         assertThat(post(
-                "/api/v1/transactions",
+                "/api/v2/transactions",
                 canonicalRequest(canonicalReference).replace("1234567890", " account ")
         ).statusCode()).isEqualTo(HttpStatus.BAD_REQUEST.value());
         assertThat(transactionRepository.count()).isZero();
@@ -448,18 +472,18 @@ class TransactionPipelineIT {
                 "\"createdAt\": \"2026-08-08T09:02:11.123456789Z\", \"metadata\""
         );
 
-        var created = post("/api/v1/transactions", request);
+        var created = post("/api/v2/transactions", request);
         assertThat(created.statusCode()).isEqualTo(HttpStatus.CREATED.value());
         var createdBody = objectMapper.readValue(created.body(), TransactionResponse.class);
         assertThat(createdBody.createdAt())
                 .isEqualTo(Instant.parse("2026-08-08T09:02:11.123456Z"));
 
-        var replay = post("/api/v1/transactions", request);
+        var replay = post("/api/v2/transactions", request);
         assertThat(replay.statusCode()).isEqualTo(HttpStatus.OK.value());
         var replayBody = objectMapper.readValue(replay.body(), TransactionResponse.class);
         assertThat(replayBody).isEqualTo(createdBody);
 
-        var read = get("/api/v1/transactions/" + createdBody.transactionId());
+        var read = get("/api/v2/transactions/" + createdBody.transactionId());
         assertThat(read.statusCode()).isEqualTo(HttpStatus.OK.value());
         assertThat(objectMapper.readValue(read.body(), TransactionResponse.class))
                 .isEqualTo(createdBody);
@@ -483,7 +507,7 @@ class TransactionPipelineIT {
         if (!start.await(5, TimeUnit.SECONDS)) {
             throw new IllegalStateException("concurrent create start gate timed out");
         }
-        return post("/api/v1/transactions", body);
+        return post("/api/v2/transactions", body);
     }
 
     private HttpResponse<String> get(String path) throws Exception {
@@ -553,6 +577,23 @@ class TransactionPipelineIT {
                   "channel": "UPI"
                 }
                 """;
+    }
+
+    private String historicalV1Request() {
+        return """
+                {
+                  "transactionId": "%s",
+                  "externalReference": "IT-HISTORICAL-V1",
+                  "amount": 150000,
+                  "currency": "INR",
+                  "type": "DEBIT",
+                  "status": "PENDING",
+                  "sourceAccount": "1234567890",
+                  "destinationAccount": "9876543210",
+                  "channel": "UPI",
+                  "metadata": {"testRun": "historical-v1"}
+                }
+                """.formatted(UUID.randomUUID());
     }
 
     private String legacyRequest() {

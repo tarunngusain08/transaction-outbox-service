@@ -11,7 +11,7 @@ public final class CurrencySupport {
 
     public static String canonicalizeLegacy(String rawCode) {
         if (rawCode == null || !INR.equals(rawCode.trim().toUpperCase(Locale.ROOT))) {
-            throw new IllegalArgumentException("Version 1 supports only INR");
+            throw new IllegalArgumentException("Version 2 supports only INR");
         }
         return INR;
     }

@@ -90,7 +90,7 @@ class TransactionServiceTest {
 
         var eventCaptor = ArgumentCaptor.forClass(TransactionCreatedEvent.class);
         verify(eventSerializer).serialize(eventCaptor.capture());
-        assertThat(eventCaptor.getValue().schemaVersion()).isEqualTo(1);
+        assertThat(eventCaptor.getValue().schemaVersion()).isEqualTo(2);
         assertThat(eventCaptor.getValue().producer()).isEqualTo("transaction-outbox-service");
         assertThat(eventCaptor.getValue().eventType()).isEqualTo(TransactionCreatedEvent.EVENT_TYPE);
         assertThat(eventCaptor.getValue().occurredAt()).isEqualTo(NOW);

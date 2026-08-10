@@ -25,7 +25,7 @@ public record LegacyTransactionRequest(
 
         @JsonProperty("ccy")
         @NotBlank
-        @Pattern(regexp = "(?i)^INR$", message = "version 1 supports only INR")
+        @Pattern(regexp = "(?i)^INR$", message = "version 2 supports only INR")
         @SupportedCurrency
         String currency,
 

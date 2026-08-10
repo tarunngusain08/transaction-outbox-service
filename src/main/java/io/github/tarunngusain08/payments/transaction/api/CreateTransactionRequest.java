@@ -32,7 +32,7 @@ public record CreateTransactionRequest(
         long amount,
 
         @NotBlank
-        @Pattern(regexp = "^INR$", message = "version 1 accepts only uppercase INR")
+        @Pattern(regexp = "^INR$", message = "version 2 accepts only uppercase INR")
         @SupportedCurrency
         String currency,
 

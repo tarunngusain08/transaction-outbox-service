@@ -22,8 +22,9 @@ from typing import Any
 
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
-CREATE_PATH = "/api/v1/transactions"
-NORMALIZE_PATH = "/api/v1/transactions/normalize"
+CREATE_PATH = "/api/v2/transactions"
+NORMALIZE_PATH = "/api/v2/transactions/normalize"
+RETIRED_CREATE_PATH = "/api/v1/transactions"
 TOPIC = "payments.transactions.created"
 TRANSACTION_FIELDS = {
     "transactionId",
@@ -126,6 +127,21 @@ def legacy_payload(external_reference: str, transaction_type: str = "DR") -> dic
     }
 
 
+def historical_v1_payload(external_reference: str) -> dict[str, Any]:
+    return {
+        "transactionId": str(uuid.uuid4()),
+        "externalReference": external_reference,
+        "amount": 150_000,
+        "currency": "INR",
+        "type": "DEBIT",
+        "status": "PENDING",
+        "sourceAccount": "1234567890",
+        "destinationAccount": "9876543210",
+        "channel": "UPI",
+        "metadata": {"generator": "traffic-simulator-v1-probe"},
+    }
+
+
 def send_request(base_url: str, case: RequestCase) -> RequestResult:
     body = None if case.payload is None else json.dumps(case.payload).encode("utf-8")
     request = urllib.request.Request(
@@ -210,6 +226,13 @@ def run_smoke(base_url: str, run_prefix: str) -> tuple[list[RequestResult], list
             path=CREATE_PATH,
             expected_status=400,
             payload=canonical_payload(f"{run_prefix}INVALID-AMOUNT", amount=0),
+        )),
+        send_request(base_url, RequestCase(
+            name="reject retired V1 without durable state",
+            method="POST",
+            path=RETIRED_CREATE_PATH,
+            expected_status=410,
+            payload=historical_v1_payload(f"{run_prefix}RETIRED-V1"),
         )),
     ])
 
@@ -581,6 +604,14 @@ def validate_http_results(
             if normalized["amount"] != 150_000 or normalized["currency"] != "INR":
                 raise RuntimeError("normalization response has the wrong canonical amount or currency")
             parse_instant(normalized["createdAt"], "normalization response createdAt")
+        elif result.case.path == RETIRED_CREATE_PATH and result.actual_status == 410:
+            problem = json.loads(result.response_body)
+            if not isinstance(problem, dict):
+                raise RuntimeError("retired V1 response was not a problem object")
+            if problem.get("type") != "urn:transaction-outbox-service:api-version-retired":
+                raise RuntimeError("retired V1 response has the wrong problem type")
+            if problem.get("successor") != CREATE_PATH:
+                raise RuntimeError("retired V1 response has the wrong V2 successor")
 
 
 def validate_database_records(
@@ -635,8 +666,8 @@ def validate_database_records(
         payload = outbox["payload"]
         if not isinstance(payload, dict) or set(payload) != EVENT_FIELDS:
             raise RuntimeError(f"stored outbox payload schema is invalid for {reference}")
-        if payload["schemaVersion"] != 1:
-            raise RuntimeError(f"stored event schemaVersion is not 1 for {reference}")
+        if payload["schemaVersion"] != 2:
+            raise RuntimeError(f"stored event schemaVersion is not 2 for {reference}")
         if payload["producer"] != "transaction-outbox-service":
             raise RuntimeError(f"stored event producer is invalid for {reference}")
         if payload["eventId"] != outbox_id:
