@@ -60,6 +60,15 @@ public class OutboxEvent {
     @Column(name = "claimed_at")
     private Instant claimedAt;
 
+    @Column(name = "quarantined_at")
+    private Instant quarantinedAt;
+
+    @Column(name = "quarantine_reason", length = MAX_ERROR_LENGTH)
+    private String quarantineReason;
+
+    @Column(name = "quarantined_from_status", length = 12)
+    private String quarantinedFromStatus;
+
     protected OutboxEvent() {
     }
 
@@ -175,5 +184,17 @@ public class OutboxEvent {
 
     public Instant getClaimedAt() {
         return claimedAt;
+    }
+
+    public Instant getQuarantinedAt() {
+        return quarantinedAt;
+    }
+
+    public String getQuarantineReason() {
+        return quarantineReason;
+    }
+
+    public String getQuarantinedFromStatus() {
+        return quarantinedFromStatus;
     }
 }

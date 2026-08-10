@@ -20,10 +20,14 @@ class OutboxDeliveryEndpointTest {
         var repository = mock(OutboxEventRepository.class);
         when(repository.countByStatus(OutboxStatus.PENDING)).thenReturn(3L);
         when(repository.countByStatus(OutboxStatus.PROCESSING)).thenReturn(2L);
+        when(repository.countByStatus(OutboxStatus.QUARANTINED)).thenReturn(1L);
         when(repository.findOldestCreatedAtByStatusIn(List.of(
                 OutboxStatus.PENDING,
                 OutboxStatus.PROCESSING
         ))).thenReturn(NOW.minusSeconds(90));
+        when(repository.findOldestCreatedAtByStatusIn(List.of(
+                OutboxStatus.QUARANTINED
+        ))).thenReturn(NOW.minusSeconds(3_600));
         var endpoint = new OutboxDeliveryEndpoint(
                 repository,
                 Clock.fixed(NOW, ZoneOffset.UTC)
@@ -33,7 +37,9 @@ class OutboxDeliveryEndpointTest {
 
         assertThat(snapshot.pending()).isEqualTo(3);
         assertThat(snapshot.processing()).isEqualTo(2);
+        assertThat(snapshot.quarantined()).isOne();
         assertThat(snapshot.oldestUnpublishedAgeSeconds()).isEqualTo(90);
+        assertThat(snapshot.oldestQuarantinedAgeSeconds()).isEqualTo(3_600);
         assertThat(snapshot.checkedAt()).isEqualTo(NOW);
     }
 }

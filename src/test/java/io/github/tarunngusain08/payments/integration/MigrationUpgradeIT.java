@@ -76,7 +76,7 @@ class MigrationUpgradeIT {
 
         assertThatThrownBy(() -> mutateAuditRow(schema, transactionId))
                 .isInstanceOf(SQLException.class)
-                .hasMessageContaining("canonicalization audit is immutable");
+                .hasMessageContaining("canonicalization audit is row-mutation protected");
     }
 
     @Test
@@ -119,34 +119,50 @@ class MigrationUpgradeIT {
     }
 
     @Test
-    void recoversHistoricalFailedOutboxRowsWithoutLosingDiagnosticHistory() throws Exception {
-        String schema = createSchema("outbox_recovery");
+    void quarantinesHistoricalV1OutboxPayloadWithoutLosingEvidence() throws Exception {
+        String schema = createSchema("outbox_quarantine");
         flyway(schema, MigrationVersion.fromVersion("5")).migrate();
-        UUID transactionId = insertV2Transaction(schema, "OUTBOX-RECOVERY");
+        UUID transactionId = insertV2Transaction(schema, "OUTBOX-QUARANTINE");
         UUID eventId = insertFailedOutboxEvent(schema, transactionId);
 
         flyway(schema, null).migrate();
 
         try (var connection = connection();
              var statement = connection.prepareStatement("""
-                     SELECT status, next_attempt_at, retry_count, last_error
+                     SELECT status,
+                            payload ->> 'schemaVersion' AS schema_version,
+                            payload #>> '{transaction,externalReference}' AS external_reference,
+                            next_attempt_at, retry_count, last_error,
+                            quarantined_at, quarantine_reason, quarantined_from_status
                      FROM %s.outbox_events
                      WHERE id = ?
                      """.formatted(schema))) {
             statement.setObject(1, eventId);
             try (var rows = statement.executeQuery()) {
                 assertThat(rows.next()).isTrue();
-                assertThat(rows.getString("status")).isEqualTo("PENDING");
+                assertThat(rows.getString("status")).isEqualTo("QUARANTINED");
+                assertThat(rows.getString("external_reference")).isEqualTo("OUTBOX-QUARANTINE");
+                assertThat(rows.getString("schema_version")).isNull();
                 assertThat(rows.getTimestamp("next_attempt_at").toInstant())
-                        .isAfter(Instant.parse("2026-08-08T09:02:11Z"));
+                        .isEqualTo(Instant.parse("2026-08-08T09:02:11Z"));
                 assertThat(rows.getInt("retry_count")).isEqualTo(8);
                 assertThat(rows.getString("last_error")).isEqualTo("historical broker outage");
+                assertThat(rows.getTimestamp("quarantined_at")).isNotNull();
+                assertThat(rows.getString("quarantine_reason"))
+                        .contains("predates event schema version 2");
+                assertThat(rows.getString("quarantined_from_status")).isEqualTo("FAILED");
             }
         }
 
         assertThatThrownBy(() -> setOutboxStatus(schema, eventId, "FAILED"))
                 .isInstanceOf(SQLException.class)
                 .hasMessageContaining("chk_outbox_");
+        assertThatThrownBy(() -> setOutboxStatus(schema, eventId, "PENDING"))
+                .isInstanceOf(SQLException.class)
+                .hasMessageContaining("chk_outbox_delivery_state");
+        assertThatThrownBy(() -> releaseQuarantinedEvent(schema, eventId))
+                .isInstanceOf(SQLException.class)
+                .hasMessageContaining("chk_outbox_publishable_schema_v2");
     }
 
     private String createSchema(String prefix) throws SQLException {
@@ -228,13 +244,36 @@ class MigrationUpgradeIT {
             Instant historicalTime = Instant.parse("2026-08-08T09:02:11Z");
             statement.setObject(1, eventId);
             statement.setObject(2, transactionId);
-            statement.setString(3, "{\"eventId\":\"" + eventId + "\"}");
+            statement.setString(3, historicalV1Payload(eventId, transactionId));
             statement.setTimestamp(4, Timestamp.from(historicalTime));
             statement.setTimestamp(5, Timestamp.from(historicalTime));
             statement.setString(6, "historical broker outage");
             assertThat(statement.executeUpdate()).isOne();
         }
         return eventId;
+    }
+
+    private String historicalV1Payload(UUID eventId, UUID transactionId) {
+        return """
+                {
+                  "eventId": "%s",
+                  "eventType": "TRANSACTION_CREATED",
+                  "occurredAt": "2026-08-08T09:02:11Z",
+                  "transaction": {
+                    "transactionId": "%s",
+                    "externalReference": "OUTBOX-QUARANTINE",
+                    "amount": 150000,
+                    "currency": "INR",
+                    "type": "DEBIT",
+                    "status": "PENDING",
+                    "sourceAccount": "1234567890",
+                    "destinationAccount": "9876543210",
+                    "channel": "UPI",
+                    "createdAt": "2026-08-08T09:02:11Z",
+                    "metadata": {}
+                  }
+                }
+                """.formatted(eventId, transactionId);
     }
 
     private void setOutboxStatus(String schema, UUID eventId, String status) throws SQLException {
@@ -244,6 +283,21 @@ class MigrationUpgradeIT {
              )) {
             statement.setString(1, status);
             statement.setObject(2, eventId);
+            statement.executeUpdate();
+        }
+    }
+
+    private void releaseQuarantinedEvent(String schema, UUID eventId) throws SQLException {
+        try (var connection = connection();
+             var statement = connection.prepareStatement("""
+                     UPDATE %s.outbox_events
+                     SET status = 'PENDING',
+                         quarantined_at = NULL,
+                         quarantine_reason = NULL,
+                         quarantined_from_status = NULL
+                     WHERE id = ?
+                     """.formatted(schema))) {
+            statement.setObject(1, eventId);
             statement.executeUpdate();
         }
     }

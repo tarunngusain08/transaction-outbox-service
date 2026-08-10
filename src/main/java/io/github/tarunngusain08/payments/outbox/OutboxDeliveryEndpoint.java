@@ -32,14 +32,22 @@ public class OutboxDeliveryEndpoint {
         Instant oldestUnpublished = outboxRepository.findOldestCreatedAtByStatusIn(
                 UNPUBLISHED_STATUSES
         );
+        Instant oldestQuarantined = outboxRepository.findOldestCreatedAtByStatusIn(
+                List.of(OutboxStatus.QUARANTINED)
+        );
         Long oldestAgeSeconds = oldestUnpublished == null
                 ? null
                 : Math.max(0, Duration.between(oldestUnpublished, now).toSeconds());
+        Long oldestQuarantinedAgeSeconds = oldestQuarantined == null
+                ? null
+                : Math.max(0, Duration.between(oldestQuarantined, now).toSeconds());
 
         return new OutboxDeliverySnapshot(
                 outboxRepository.countByStatus(OutboxStatus.PENDING),
                 outboxRepository.countByStatus(OutboxStatus.PROCESSING),
+                outboxRepository.countByStatus(OutboxStatus.QUARANTINED),
                 oldestAgeSeconds,
+                oldestQuarantinedAgeSeconds,
                 now
         );
     }
