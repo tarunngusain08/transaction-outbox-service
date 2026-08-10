@@ -22,7 +22,7 @@ BEGIN
                   !~ '^[A-Za-z0-9][A-Za-z0-9._:/-]{0,99}$'
     ) THEN
         RAISE EXCEPTION
-            'V3 aborted before mutation: an external reference violates the V2 ASCII identity policy';
+            'V3 aborted before mutation: an external reference violates the V1 ASCII identity policy';
     END IF;
 
     IF EXISTS (SELECT 1 FROM transactions WHERE currency <> 'INR') THEN
@@ -37,7 +37,7 @@ BEGIN
            OR destination_account !~ '^[A-Za-z0-9][A-Za-z0-9._:/-]{0,63}$'
     ) THEN
         RAISE EXCEPTION
-            'V3 aborted before mutation: an account identifier violates the V2 ASCII identity policy';
+            'V3 aborted before mutation: an account identifier violates the V1 ASCII identity policy';
     END IF;
 
     IF EXISTS (
@@ -56,7 +56,7 @@ BEGIN
            OR created_at > CURRENT_TIMESTAMP + INTERVAL '5 minutes'
     ) THEN
         RAISE EXCEPTION
-            'V3 aborted before mutation: a historical transaction timestamp is outside the V2 bounds';
+            'V3 aborted before mutation: a historical transaction timestamp is outside the V1 bounds';
     END IF;
 END
 $$;
@@ -96,20 +96,20 @@ SET external_reference = audit.new_reference
 FROM transaction_reference_canonicalization_audit AS audit
 WHERE transaction.id = audit.transaction_id;
 
-CREATE FUNCTION reject_reference_audit_row_mutation()
+CREATE FUNCTION reject_reference_audit_mutation()
 RETURNS TRIGGER
 LANGUAGE plpgsql
 AS $$
 BEGIN
-    RAISE EXCEPTION 'transaction reference canonicalization audit is row-mutation protected';
+    RAISE EXCEPTION 'transaction reference canonicalization audit is immutable';
 END
 $$;
 
-CREATE TRIGGER trg_reference_audit_row_mutation
+CREATE TRIGGER trg_reference_audit_immutable
     BEFORE INSERT OR UPDATE OR DELETE
     ON transaction_reference_canonicalization_audit
     FOR EACH ROW
-    EXECUTE FUNCTION reject_reference_audit_row_mutation();
+    EXECUTE FUNCTION reject_reference_audit_mutation();
 
 ALTER TABLE transactions
     ADD COLUMN source_system VARCHAR(32) NOT NULL DEFAULT 'DIRECT_API',

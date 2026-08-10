@@ -119,11 +119,16 @@ class MigrationUpgradeIT {
     }
 
     @Test
-    void quarantinesHistoricalV1OutboxPayloadWithoutLosingEvidence() throws Exception {
+    void upgradesPreviousM08DatabaseAndQuarantinesHistoricalPayload() throws Exception {
         String schema = createSchema("outbox_quarantine");
         flyway(schema, MigrationVersion.fromVersion("5")).migrate();
         UUID transactionId = insertV2Transaction(schema, "OUTBOX-QUARANTINE");
         UUID eventId = insertFailedOutboxEvent(schema, transactionId);
+
+        // V1-V6 are byte-locked to artifact 1d9d97c by AppliedMigrationIntegrityTest.
+        // Reaching V6 therefore creates the exact previously deployed database state.
+        flyway(schema, MigrationVersion.fromVersion("6")).migrate();
+        Instant recoveredNextAttempt = readNextAttemptAt(schema, eventId);
 
         flyway(schema, null).migrate();
 
@@ -144,13 +149,13 @@ class MigrationUpgradeIT {
                 assertThat(rows.getString("external_reference")).isEqualTo("OUTBOX-QUARANTINE");
                 assertThat(rows.getString("schema_version")).isNull();
                 assertThat(rows.getTimestamp("next_attempt_at").toInstant())
-                        .isEqualTo(Instant.parse("2026-08-08T09:02:11Z"));
+                        .isEqualTo(recoveredNextAttempt);
                 assertThat(rows.getInt("retry_count")).isEqualTo(8);
                 assertThat(rows.getString("last_error")).isEqualTo("historical broker outage");
                 assertThat(rows.getTimestamp("quarantined_at")).isNotNull();
                 assertThat(rows.getString("quarantine_reason"))
                         .contains("predates event schema version 2");
-                assertThat(rows.getString("quarantined_from_status")).isEqualTo("FAILED");
+                assertThat(rows.getString("quarantined_from_status")).isEqualTo("PENDING");
             }
         }
 
@@ -299,6 +304,19 @@ class MigrationUpgradeIT {
                      """.formatted(schema))) {
             statement.setObject(1, eventId);
             statement.executeUpdate();
+        }
+    }
+
+    private Instant readNextAttemptAt(String schema, UUID eventId) throws SQLException {
+        try (var connection = connection();
+             var statement = connection.prepareStatement(
+                     "SELECT next_attempt_at FROM %s.outbox_events WHERE id = ?".formatted(schema)
+             )) {
+            statement.setObject(1, eventId);
+            try (var rows = statement.executeQuery()) {
+                assertThat(rows.next()).isTrue();
+                return rows.getTimestamp("next_attempt_at").toInstant();
+            }
         }
     }
 

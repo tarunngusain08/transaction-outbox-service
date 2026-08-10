@@ -66,12 +66,13 @@ class HistoricalOutboxCompatibilityIT {
     );
 
     @Test
-    void migratedV1PayloadCannotPublishWhileNewV2EventTraversesKafka() throws Exception {
+    void previousM08DatabaseUpgradesWithoutPublishingHistoricalPayload() throws Exception {
         String schema = createSchema();
         flyway(schema, MigrationVersion.fromVersion("5")).migrate();
         UUID historicalTransactionId = insertHistoricalTransaction(schema);
         UUID historicalEventId = insertHistoricalFailedEvent(schema, historicalTransactionId);
 
+        flyway(schema, MigrationVersion.fromVersion("6")).migrate();
         flyway(schema, null).migrate();
         createTopic();
 
