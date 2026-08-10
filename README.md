@@ -79,6 +79,7 @@ runs. `make reset` explicitly deletes both local volumes.
 | `make coverage` | Run all tests and enforce at least 70% line and 65% branch coverage |
 | `make lint` | Run Checkstyle and compile-check the Python support scripts |
 | `make docs-lint` | Validate Markdown, links, traceability, and Mermaid syntax |
+| `make migration-preflight` | Produce the read-only V2-to-V3 reconciliation worklist |
 | `make traffic` | Start the stack and run the mixed end-to-end smoke scenario |
 | `make load-test` | Run configurable concurrent traffic with local acceptance bounds |
 | `make check` | Run static/docs checks, all tests, coverage, and the build |
@@ -240,6 +241,11 @@ Dependabot configuration is included.
 
 For retry, concurrency, operational retention, and production-hardening details, see
 [docs/architecture.md](docs/architecture.md).
+
+Before upgrading a retained V2 database, follow the
+[V3 identity migration runbook](docs/migrations/v3-identity-migration.md). A
+collision aborts before mutation; no historical transaction is automatically
+merged, renamed, deleted, moved, or selected as a winner.
 
 ## Scope and license
 

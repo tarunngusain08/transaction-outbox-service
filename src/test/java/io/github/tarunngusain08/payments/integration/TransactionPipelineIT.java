@@ -209,7 +209,7 @@ class TransactionPipelineIT {
 
         var collision = post(
                 "/api/v1/transactions",
-                canonicalRequest(transactionId, conflictingReference, 999L, "USD", "CREDIT")
+                canonicalRequest(transactionId, conflictingReference, 999L, "INR", "CREDIT")
         );
 
         assertThat(collision.statusCode()).isEqualTo(HttpStatus.CONFLICT.value());
