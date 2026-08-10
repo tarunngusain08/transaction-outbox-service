@@ -26,6 +26,9 @@ audit archive is a production follow-up in
 
 Detailed behavioral documentation:
 
+- [V1 contract decision](docs/decisions/0001-v1-ingestion-contract.md) — exact
+  money, identity, ownership, idempotency, metadata, migration, normalization,
+  and outbox-recovery rules.
 - [Use-case model](docs/use-cases.md) — complete implemented and planned scope,
   with actors, triggers, outcomes, and explicit status.
 - [Sequence-diagram catalog](docs/sequence-diagrams.md) — success, rejection,

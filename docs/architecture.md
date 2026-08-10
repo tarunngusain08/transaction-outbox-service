@@ -2,6 +2,9 @@
 
 ## Documentation map
 
+- [V1 contract decision](decisions/0001-v1-ingestion-contract.md) — governing
+  money, identity, ownership, idempotency, metadata, migration, normalization,
+  and outbox-recovery rules.
 - [Use-case model](use-cases.md) — actors, triggers, outcomes, status, and
   implemented-versus-planned scope.
 - [Sequence-diagram catalog](sequence-diagrams.md) — runtime ordering, state
