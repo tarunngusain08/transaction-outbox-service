@@ -1,4 +1,4 @@
-FROM eclipse-temurin:21-jdk@sha256:efd34b940f2d5a621605c8531c2afb7759c936b6c2ef637a69aa3bf3e1e789d1 AS build
+FROM eclipse-temurin:25-jdk@sha256:12e44624adee6808a36d962717e1656e0afeeeff5a100f9cb00e0136513558f0 AS build
 WORKDIR /workspace
 RUN apt-get update \
     && apt-get install --yes --no-install-recommends unzip \
@@ -9,7 +9,7 @@ RUN ./mvnw --batch-mode --no-transfer-progress dependency:go-offline
 COPY src src
 RUN ./mvnw --batch-mode --no-transfer-progress clean package -DskipUnitTests=true
 
-FROM eclipse-temurin:21-jre@sha256:8cef5fc7bebe421363ab543a2f4db5caf7d119d8db67d56b0f56c485d2de4d55
+FROM eclipse-temurin:25-jre@sha256:f19dbf0a22d0b3658fda48ce7d7181df05ad14bda151dd5ad12cc09d1451c70e
 WORKDIR /app
 RUN apt-get update \
     && apt-get install --yes --no-install-recommends curl \
