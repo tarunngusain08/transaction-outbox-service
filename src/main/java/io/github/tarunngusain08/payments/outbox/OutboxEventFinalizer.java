@@ -10,14 +10,9 @@ import java.time.Instant;
 public class OutboxEventFinalizer {
 
     private final OutboxEventRepository outboxRepository;
-    private final OutboxProperties properties;
 
-    public OutboxEventFinalizer(
-            OutboxEventRepository outboxRepository,
-            OutboxProperties properties
-    ) {
+    public OutboxEventFinalizer(OutboxEventRepository outboxRepository) {
         this.outboxRepository = outboxRepository;
-        this.properties = properties;
     }
 
     @Transactional(propagation = Propagation.REQUIRES_NEW)
@@ -42,9 +37,7 @@ public class OutboxEventFinalizer {
             return OutboxDeliveryResult.SKIPPED;
         }
 
-        event.recordFailure(error, failedAt, properties.maxRetries());
-        return event.getStatus() == OutboxStatus.FAILED
-                ? OutboxDeliveryResult.PERMANENTLY_FAILED
-                : OutboxDeliveryResult.RETRY_SCHEDULED;
+        event.recordFailure(error, failedAt);
+        return OutboxDeliveryResult.RETRY_SCHEDULED;
     }
 }

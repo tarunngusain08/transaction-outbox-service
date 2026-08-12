@@ -16,7 +16,7 @@ import java.net.URI;
 import java.util.UUID;
 
 @RestController
-@RequestMapping("/api/v1/transactions")
+@RequestMapping("/api/v2/transactions")
 public class TransactionController {
 
     private final TransactionService transactionService;
@@ -36,7 +36,7 @@ public class TransactionController {
     ) {
         var result = transactionService.create(request);
         var transaction = result.transaction();
-        var location = URI.create("/api/v1/transactions/" + transaction.transactionId());
+        var location = URI.create("/api/v2/transactions/" + transaction.transactionId());
         return result.created()
                 ? ResponseEntity.created(location).body(transaction)
                 : ResponseEntity.ok().location(location).body(transaction);
@@ -48,7 +48,7 @@ public class TransactionController {
     }
 
     @PostMapping("/normalize")
-    public TransactionResponse normalize(
+    public CreateTransactionRequest normalize(
             @Valid @RequestBody LegacyTransactionRequest request
     ) {
         return transactionNormalizer.normalize(request);

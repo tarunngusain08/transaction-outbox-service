@@ -19,6 +19,7 @@ import java.util.concurrent.CompletableFuture;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
 @ExtendWith(MockitoExtension.class)
@@ -46,9 +47,10 @@ class OutboxEventDeliveryTest {
                 TOPIC,
                 Duration.ofSeconds(1),
                 50,
-                3,
                 Duration.ofSeconds(2),
-                Duration.ofSeconds(10)
+                Duration.ofSeconds(2),
+                Duration.ofSeconds(10),
+                Duration.ofSeconds(1)
         );
         delivery = new OutboxEventDelivery(
                 kafkaTemplate,
@@ -113,15 +115,13 @@ class OutboxEventDeliveryTest {
         var event = claimedEvent();
         when(kafkaTemplate.send(TOPIC, event.aggregateId().toString(), event.payload()))
                 .thenReturn(new CompletableFuture<>());
-        when(finalizer.recordFailure(event, "InterruptedException", NOW))
-                .thenReturn(OutboxDeliveryResult.RETRY_SCHEDULED);
         Thread.currentThread().interrupt();
 
         var result = delivery.deliver(event);
 
         assertThat(result).isEqualTo(OutboxDeliveryResult.INTERRUPTED);
         assertThat(Thread.currentThread().isInterrupted()).isTrue();
-        verify(finalizer).recordFailure(event, "InterruptedException", NOW);
+        verifyNoInteractions(finalizer);
     }
 
     private ClaimedOutboxEvent claimedEvent() {

@@ -15,13 +15,14 @@ class TransactionEventSerializerTest {
     @Test
     void serializesTheVersionedEventEnvelope() throws Exception {
         var event = new TransactionCreatedEvent(
-                1,
+                TransactionCreatedEvent.SCHEMA_VERSION,
                 "transaction-outbox-service",
                 UUID.randomUUID(),
                 "TRANSACTION_CREATED",
                 Instant.parse("2026-08-08T10:15:30Z"),
                 new TransactionResponse(
                         UUID.randomUUID(),
+                        "DIRECT_API",
                         "SOURCE-123",
                         100L,
                         "INR",
@@ -31,6 +32,7 @@ class TransactionEventSerializerTest {
                         "payee",
                         PaymentChannel.UPI,
                         Instant.parse("2026-08-08T10:15:30Z"),
+                        Instant.parse("2026-08-08T10:15:30Z"),
                         Map.of()
                 )
         );
@@ -39,7 +41,7 @@ class TransactionEventSerializerTest {
         var serialized = new TransactionEventSerializer(objectMapper).serialize(event);
         var json = objectMapper.readTree(serialized);
 
-        assertThat(json.path("schemaVersion").asInt()).isEqualTo(1);
+        assertThat(json.path("schemaVersion").asInt()).isEqualTo(2);
         assertThat(json.path("producer").asString()).isEqualTo("transaction-outbox-service");
         assertThat(json.path("eventId").asString()).isEqualTo(event.eventId().toString());
     }

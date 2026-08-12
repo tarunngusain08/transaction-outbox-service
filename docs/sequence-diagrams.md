@@ -1,11 +1,133 @@
 # Sequence-diagram catalog
 
-These diagrams describe observable ordering and state transitions. Sections
+These diagrams describe observable ordering and state transitions. They are the
+canonical home for repository visuals: the README contains only its compact
+reviewer overview, while this catalog retains every detailed diagram. Sections
 labelled **implemented** correspond to executable repository behavior. Sections
-labelled **planned** are next-phase designs and are not available today.
+labelled **planned / not implemented** are future designs, not available today.
 
 The use-case IDs and actor definitions are maintained in
 [the use-case model](use-cases.md).
+
+## Scope maps
+
+### Implemented use cases
+
+```mermaid
+flowchart LR
+    apiClient["Actor: API client"]
+    scheduler["Actor: Spring scheduler"]
+    operator["Actor: Operator / health probe"]
+    deployment["Actor: Deployment operator"]
+    migration["Actor: Flyway migration runner"]
+    kafkaBroker["Actor: Kafka broker"]
+    kafkaConsumer["Actor: Kafka consumer"]
+
+    subgraph service["Transaction Outbox Service — implemented"]
+        uc01(["UC-01 Create canonical transaction"])
+        uc02(["UC-02 Retrieve transaction by ID"])
+        uc03(["UC-03 Normalize legacy transaction"])
+        uc04(["UC-04 Claim and publish a due outbox event"])
+        uc05(["UC-05 Retry delivery until published"])
+        uc06(["UC-06 Publish transaction-created contract"])
+        uc07(["UC-07 Report application and outbox status"])
+        uc08(["UC-08 Inspect retained operational history"])
+        uc09(["UC-09 Reject retired API V1 explicitly"])
+        uc10(["UC-10 Gate and quarantine pre-V2 events"])
+    end
+
+    apiClient --> uc01
+    apiClient --> uc02
+    apiClient --> uc03
+    apiClient --> uc09
+    deployment --> uc10
+    migration --> uc10
+    scheduler --> uc04
+    uc01 -->|"atomically creates PENDING event"| uc04
+    uc04 -->|"delivery error"| uc05
+    uc05 -->|"due retry"| uc04
+    uc04 -->|"acknowledged payload"| uc06
+    uc06 --> kafkaBroker
+    kafkaConsumer -->|"consumes and deduplicates by eventId"| kafkaBroker
+    operator --> uc07
+    operator --> uc08
+    uc10 -->|"reported separately"| uc07
+    uc10 -->|"preserved evidence"| uc08
+
+    classDef implemented fill:#e8f5e9,stroke:#2e7d32,color:#1b5e20;
+    class uc01,uc02,uc03,uc04,uc05,uc06,uc07,uc08,uc09,uc10 implemented;
+```
+
+### Planned / not implemented use cases
+
+```mermaid
+flowchart LR
+    apiClient["Actor: API client"]
+    identity["Actor: Identity provider / security admin"]
+    operator["Actor: Authorized operator"]
+    retention["Actor: Retention scheduler"]
+    platform["Actor: Platform / SRE"]
+    deliveryTeam["Actor: Developer / CI"]
+    schemaRegistry["Actor: Schema registry"]
+
+    subgraph planned["Transaction Outbox Service — planned next phases"]
+        p01(["UC-P01 Authenticate and authorize requests"])
+        p02(["UC-P02 Enforce request rate limits"])
+        p03(["UC-P03 Protect account identifiers and logs"])
+        p04(["UC-P04 Expedite a persistent delivery retry"])
+        p05(["UC-P05 Archive eligible PUBLISHED events"])
+        p06(["UC-P06 Export telemetry and alert on SLOs"])
+        p07(["UC-P07 Enforce event-schema compatibility"])
+        p08(["UC-P08 Review and replay quarantined payload"])
+    end
+
+    apiClient --> p01
+    identity --> p01
+    apiClient --> p02
+    p01 -->|"allowed request"| p03
+    operator --> p04
+    retention --> p05
+    platform --> p06
+    deliveryTeam --> p07
+    p07 --> schemaRegistry
+    operator --> p08
+
+    classDef planned fill:#fff8e1,stroke:#f9a825,color:#5d4037,stroke-dasharray:5 5;
+    class p01,p02,p03,p04,p05,p06,p07,p08 planned;
+```
+
+### Implemented engineering workflows
+
+```mermaid
+flowchart LR
+    developer["Actor: Developer"]
+    ci["Actor: GitHub Actions"]
+
+    subgraph engineering["Repository engineering workflows — implemented"]
+        eng01(["ENG-01 Build JAR and image"])
+        eng02(["ENG-02 Run / stop local stack"])
+        eng03(["ENG-03 Run unit, integration, lint, coverage"])
+        eng04(["ENG-04 Run mixed smoke traffic"])
+        eng05(["ENG-05 Run concurrent load traffic"])
+        eng06(["ENG-06 Execute CI quality gates"])
+        eng07(["ENG-07 Run migration release gates"])
+    end
+
+    developer --> eng01
+    developer --> eng02
+    developer --> eng03
+    developer --> eng04
+    developer --> eng05
+    developer --> eng07
+    ci --> eng06
+    eng06 --> eng01
+    eng06 --> eng03
+    eng06 --> eng04
+    eng06 --> eng05
+
+    classDef implemented fill:#e8f5e9,stroke:#2e7d32,color:#1b5e20;
+    class eng01,eng02,eng03,eng04,eng05,eng06,eng07 implemented;
+```
 
 ## Implemented runtime sequences
 
@@ -18,22 +140,21 @@ sequenceDiagram
     participant MVC as Spring MVC validation
     participant Controller as TransactionController
     participant Service as TransactionService
-    participant TxRepo as Transaction repository
+    participant Inserter as Native transaction inserter
     participant OutboxRepo as Outbox repository
     participant DB as PostgreSQL
 
-    Client->>MVC: POST /api/v1/transactions
+    Client->>MVC: POST /api/v2/transactions
     MVC->>Controller: Valid CreateTransactionRequest
     Controller->>Service: create(request)
     Note over Service,DB: Spring opens the transaction before create method logic executes
-    Service->>Service: Trim reference and apply source defaults
-    Service->>TxRepo: findByExternalReference(canonical reference)
-    TxRepo->>DB: SELECT transaction
-    DB-->>TxRepo: empty
-    Service->>Service: Apply UUID, PENDING status, and UTC-time defaults
-    Service->>TxRepo: persist(transaction) and flush
-    TxRepo->>DB: Execute insert-only INSERT transactions
-    Service->>Service: Serialize version-1 TRANSACTION_CREATED with a new eventId
+    Service->>Service: Validate and canonicalize metadata/timestamps
+    Service->>Service: Apply UUID, PENDING, and receivedAt
+    Service->>Service: SHA-256 all canonical client-owned fields
+    Service->>Inserter: insertIfAbsent(transaction)
+    Inserter->>DB: INSERT ... ON CONFLICT DO NOTHING RETURNING id
+    DB-->>Inserter: New transaction id
+    Service->>Service: Serialize schema-version-2 TRANSACTION_CREATED with a new eventId
     Service->>OutboxRepo: save(PENDING event)
     OutboxRepo-->>Service: Managed event (SQL may be deferred)
     Service->>DB: Flush pending outbox INSERT and commit
@@ -55,7 +176,7 @@ sequenceDiagram
     participant DB as PostgreSQL
     participant Handler as ApiExceptionHandler
 
-    Client->>MVC: POST /api/v1/transactions
+    Client->>MVC: POST /api/v2/transactions
     alt Bean validation fails
         MVC->>Handler: MethodArgumentNotValidException
         Handler-->>Client: 400 ProblemDetail + field errors
@@ -64,28 +185,23 @@ sequenceDiagram
         MVC->>Controller: CreateTransactionRequest
         Controller->>Service: create(request)
         Note over Service,DB: Transaction starts before service method logic
-        Service->>DB: Read by trimmed external_reference
-        alt Reference already exists
-            DB-->>Service: Stored transaction
-            alt Canonical request matches stored fields
+        Service->>Service: Canonicalize input and calculate fingerprint
+        Service->>DB: INSERT ... ON CONFLICT DO NOTHING RETURNING id
+        alt This request wins the key
+            DB-->>Service: New transaction id
+            Service->>DB: Stage outbox row and commit both rows
+            Service-->>Controller: New transaction, created=true
+            Controller-->>Client: 201 Created + Location
+        else Key already committed or concurrently won
+            DB-->>Service: No returned id after winner commits
+            Service->>DB: SELECT by source_system and external_reference
+            DB-->>Service: Durable winning transaction
+            alt Version and fingerprint match
                 Service-->>Controller: Original transaction, replayed=true
                 Controller-->>Client: 200 OK + original Location
-            else Same reference has different fields
+            else Fingerprint differs or historical fingerprint is absent
                 Service->>Handler: DuplicateTransactionException
                 Handler-->>Client: 409 ProblemDetail
-            end
-        else New reference
-            Service->>DB: Insert-only transaction flush and stage outbox
-            alt Known primary/external unique constraint loses a race
-                DB-->>Service: DataIntegrityViolationException
-                Note over Service,DB: Spring rolls back the whole database transaction
-                Service->>Handler: Known unique constraint
-                Handler-->>Client: 409 ProblemDetail
-            else Unrelated integrity constraint fails
-                DB-->>Service: DataIntegrityViolationException
-                Note over Service,DB: Spring rolls back the whole database transaction
-                Service->>Handler: Unexpected integrity failure
-                Handler-->>Client: Sanitized 500 ProblemDetail
             end
         end
     end
@@ -104,7 +220,7 @@ sequenceDiagram
     participant DB as PostgreSQL
     participant Handler as ApiExceptionHandler
 
-    Client->>MVC: GET /api/v1/transactions/{transactionId}
+    Client->>MVC: GET /api/v2/transactions/{transactionId}
     alt Path value is not a UUID
         MVC-->>Client: 400 Bad Request
     else UUID is valid
@@ -137,7 +253,7 @@ sequenceDiagram
     participant Normalizer as TransactionNormalizer
     participant Handler as ApiExceptionHandler
 
-    Client->>MVC: POST /api/v1/transactions/normalize
+    Client->>MVC: POST /api/v2/transactions/normalize
     alt Required field/IFSC shape or currency is invalid/unsupported
         MVC->>Handler: MethodArgumentNotValidException
         Handler-->>Client: 400 ProblemDetail + field errors
@@ -148,19 +264,47 @@ sequenceDiagram
         Normalizer->>Normalizer: Map DR/CR and payment channel
         Normalizer->>Normalizer: Convert Asia/Kolkata source time to Instant
         Normalizer->>Normalizer: Flatten accounts and preserve source metadata
-        alt Amount, type, or date is semantically invalid
+        Normalizer->>Normalizer: Validate exact create-compatible request
+        alt Amount, type, date, identifier, timestamp, or metadata is invalid
             Normalizer->>Handler: NormalizationException
             Handler-->>Client: 422 ProblemDetail
         else Normalization succeeds
-            Normalizer-->>Controller: Canonical TransactionResponse
-            Controller-->>Client: 200 OK
+            Normalizer-->>Controller: Deterministic CreateTransactionRequest
+            Controller-->>Client: 200 OK with no server-owned fields
             Note over Client,Normalizer: Unknown channel maps to OTHER and original mode is metadata
+            Note over Client,Normalizer: Response can be POSTed unchanged to create
             Note over Client,Normalizer: No PostgreSQL write and no Kafka publish occur
         end
     end
 ```
 
-### UC-04, UC-05, UC-06 — Deliver, retry, or terminally fail an outbox event
+### UC-09 — Reject retired API V1 explicitly
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor Client as Legacy API client
+    participant Retired as RetiredV1TransactionController
+    participant Service as TransactionService
+    participant DB as PostgreSQL
+    participant Kafka as Kafka broker
+
+    alt Retired create
+        Client->>Retired: POST /api/v1/transactions
+        Retired-->>Client: 410 + successor /api/v2/transactions
+    else Retired normalization
+        Client->>Retired: POST /api/v1/transactions/normalize
+        Retired-->>Client: 410 + successor /api/v2/transactions/normalize
+    else Retired retrieval
+        Client->>Retired: GET /api/v1/transactions/{transactionId}
+        Retired-->>Client: 410 + same-ID /api/v2/transactions/{transactionId}
+    end
+    Note over Retired,Service: V1 body is not bound or reinterpreted as V2
+    Note over Service,DB: No service call and no transaction/outbox write
+    Note over DB,Kafka: No row and no event are created
+```
+
+### UC-04, UC-05, UC-06 — Deliver, retry, or recover an outbox event
 
 ```mermaid
 sequenceDiagram
@@ -175,51 +319,108 @@ sequenceDiagram
     participant Consumer as External consumer
 
     Scheduler->>Publisher: publishPendingBatch() on fixed delay
-    Publisher->>Claim: claimBatch()
-    Note over Claim,DB: Short REQUIRES_NEW claim transaction
-    Claim->>DB: SELECT due PENDING or expired PROCESSING rows FOR UPDATE SKIP LOCKED
-    DB-->>Claim: Disjoint bounded event IDs
-    Claim->>DB: Set PROCESSING, claim_token, claimed_at
-    Claim->>DB: Commit and release every row lock
-    Claim-->>Publisher: Immutable claimed event snapshots
-    loop Each claimed event
-        Publisher->>Delivery: deliver(claimed event)
-        Note over Delivery,Kafka: No database transaction or row lock is open
-        Delivery->>Kafka: Send key=transactionId and stored versioned JSON, then await acknowledgement
-        Kafka-->>Consumer: Record may be observable before DB finalize commit
-        Consumer->>Consumer: Validate schemaVersion and deduplicate by eventId
-        alt Broker acknowledges before timeout
-            Kafka-->>Delivery: Send result
-            Delivery->>Finalizer: markPublished(eventId, claimToken)
-            Note over Finalizer,DB: Short REQUIRES_NEW finalize transaction
-            Finalizer->>DB: Lock row and require current PROCESSING claim token
-            alt Claim token is still current
-                Finalizer->>DB: Set PUBLISHED and published_at, clear claim/error, then commit
-                Finalizer-->>Delivery: PUBLISHED
-            else Lease was reclaimed or row changed
-                Finalizer->>DB: Commit without mutation
-                Finalizer-->>Delivery: SKIPPED
-            end
-        else Send fails, times out, or is interrupted
-            Delivery->>Finalizer: recordFailure(eventId, claimToken, bounded error)
-            Finalizer->>DB: Lock row and require current PROCESSING claim token
-            alt Current claim and retry_count below maxRetries
-                Finalizer->>DB: Set PENDING and next_attempt_at, clear claim, then commit
-                Finalizer-->>Delivery: RETRY_SCHEDULED
-            else Current claim reaches maxRetries
-                Finalizer->>DB: Set FAILED, clear claim, then commit
-                Finalizer-->>Delivery: PERMANENTLY_FAILED
-            else Claim token is stale
-                Finalizer->>DB: Commit without mutation
-                Finalizer-->>Delivery: SKIPPED
-            end
-            opt Thread was interrupted
+    loop At most configured batchSize times
+        Publisher->>Claim: claimNext()
+        Note over Claim,DB: Short REQUIRES_NEW transaction immediately before this send
+        Claim->>DB: SELECT one due PENDING or expired PROCESSING row FOR UPDATE SKIP LOCKED
+        alt No row is due
+            DB-->>Claim: Empty
+            Claim-->>Publisher: Empty
+            Publisher->>Publisher: Return from this scheduled run
+        else One row is selected
+            DB-->>Claim: Event ID
+            Claim->>DB: Set PROCESSING, claim_token, claimed_at, then commit
+            Claim-->>Publisher: One immutable claimed snapshot
+            Publisher->>Delivery: deliver(claimed event) immediately
+            Note over Delivery,Kafka: No database transaction or row lock is open
+            Delivery->>Kafka: Send key=transactionId and stored JSON, then await acknowledgement
+            alt Broker acknowledges before timeout
+                Kafka-->>Consumer: Record may be observable before DB finalize commit
+                Consumer->>Consumer: Validate schemaVersion and deduplicate by eventId
+                Kafka-->>Delivery: Send result
+                Delivery->>Finalizer: markPublished(eventId, claimToken)
+                Note over Finalizer,DB: Short REQUIRES_NEW finalize transaction
+                Finalizer->>DB: Lock row and require current PROCESSING claim token
+                alt Claim token is still current
+                    Finalizer->>DB: Set PUBLISHED and published_at, clear claim/error, then commit
+                    Finalizer-->>Delivery: PUBLISHED
+                else Lease was reclaimed or row changed
+                    Finalizer->>DB: Commit without mutation
+                    Finalizer-->>Delivery: SKIPPED
+                end
+            else Non-interruption failure or timeout
+                Delivery->>Finalizer: recordFailure(eventId, claimToken, bounded error)
+                Finalizer->>DB: Lock row and require current PROCESSING claim token
+                alt Claim token is current
+                    Finalizer->>DB: Increment retry_count, set due PENDING with capped backoff, clear claim
+                    Finalizer-->>Delivery: RETRY_SCHEDULED
+                else Claim token is stale
+                    Finalizer->>DB: Commit without mutation
+                    Finalizer-->>Delivery: SKIPPED
+                end
+            else Sender is interrupted
                 Delivery-->>Publisher: INTERRUPTED and preserve interrupt flag
-                Publisher->>Publisher: Stop batch before any later send
+                Note over Delivery,DB: No failure finalize and row stays PROCESSING with unchanged retry_count
+                Publisher->>Publisher: Return before another claim and let lease expiry recover ownership
             end
         end
     end
+    Note over Publisher,DB: Later batch entries are never pre-claimed
     Note over Delivery,Kafka: Acknowledgement plus finalize failure or lease expiry can produce a duplicate publish
+```
+
+### UC-10, ENG-07 — Gate and quarantine pre-V2 unpublished events
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor Operator as Deployment operator
+    participant Writers as Application writers / pollers
+    participant Make as Make migration-v7-preflight
+    participant Flyway as Flyway V7
+    participant DB as PostgreSQL
+    participant OldPublisher as Compatible pre-V2 publisher
+    participant Publisher as V2 outbox publisher
+    participant Kafka as Kafka broker
+
+    Operator->>Writers: Stop every writer and poller
+    Operator->>DB: Take restorable snapshot and capture Flyway history
+    Operator->>Make: Run read-only repeatable-read preflight
+    Make->>DB: Check six expected V1-V6 tuple matches and versioned-row count
+    alt Recorded-history condition fails or database is already at V7
+        DB-->>Make: Reject migration state
+        Make-->>Operator: Exit nonzero without approving release
+    else Recorded-history condition is accepted
+        Make->>DB: Count and inventory PENDING / PROCESSING / FAILED
+        DB-->>Operator: Worklist plus unresolved historical count
+        alt Count is zero
+            Make-->>Operator: Exit zero
+            Operator->>Flyway: Apply V7
+            Flyway->>DB: Add quarantine evidence, discriminator constraint, and index
+            Flyway->>DB: Commit forward-only schema changes
+            Operator->>Writers: Start V2 application after verification
+        else Count is nonzero and can be drained
+            Make-->>Operator: Exit nonzero
+            Operator->>OldPublisher: Start compatible publisher under controlled change
+            OldPublisher->>Kafka: Deliver historical payloads
+            OldPublisher->>DB: Record acknowledged rows PUBLISHED
+            Operator->>Writers: Stop old publisher, rerun preflight until zero
+            Operator->>Flyway: Apply V7 only after gate passes
+            Operator->>Writers: Start V2 application after verification
+        else Count is nonzero and cannot be drained
+            Make-->>Operator: Exit nonzero
+            Operator->>Flyway: Separately authorize V7 only for fail-safe containment
+            Flyway->>DB: Move post-V6 PENDING / PROCESSING to QUARANTINED
+            Flyway->>DB: Preserve payload/diagnostics and clear claims
+            Note over Operator,DB: Release remains incomplete until UC-P08 resolves every row
+        end
+    end
+    opt Only after a successful V2 release
+        Publisher->>DB: Claim only due PENDING or expired PROCESSING
+        DB-->>Publisher: New V2 event or empty, never QUARANTINED
+        Publisher->>Kafka: Publish only when a claimable V2 event exists
+        Note over DB,Kafka: Numeric schemaVersion 2 is only a discriminator, and the preflight is a narrow recorded-history gate
+    end
 ```
 
 ### UC-04 — Claim disjoint work across concurrent pollers
@@ -232,24 +433,24 @@ sequenceDiagram
     participant DB as PostgreSQL
     participant Kafka as Kafka broker
 
-    par Claim transaction A
-        WorkerA->>DB: SELECT bounded due rows FOR UPDATE SKIP LOCKED
-        DB-->>WorkerA: Batch A
-        WorkerA->>DB: Mark Batch A PROCESSING with claim tokens, then commit
-    and Claim transaction B
-        WorkerB->>DB: SELECT bounded due rows FOR UPDATE SKIP LOCKED
-        DB-->>WorkerB: Disjoint Batch B (locked rows skipped)
-        WorkerB->>DB: Mark Batch B PROCESSING with claim tokens, then commit
+    par Claim one event for worker A
+        WorkerA->>DB: SELECT one due row FOR UPDATE SKIP LOCKED
+        DB-->>WorkerA: Event A
+        WorkerA->>DB: Mark Event A PROCESSING with a claim token, then commit
+    and Claim one event for worker B
+        WorkerB->>DB: SELECT one due row FOR UPDATE SKIP LOCKED
+        DB-->>WorkerB: Disjoint Event B (locked Event A is skipped)
+        WorkerB->>DB: Mark Event B PROCESSING with a claim token, then commit
     end
     Note over WorkerA,WorkerB: Database locks are released before broker I/O
-    par Publish Batch A outside a DB transaction
-        WorkerA->>Kafka: Publish claimed payloads
-        Kafka-->>WorkerA: Acknowledgements
-        WorkerA->>DB: Guarded short finalize transactions
-    and Publish Batch B outside a DB transaction
-        WorkerB->>Kafka: Publish claimed payloads
-        Kafka-->>WorkerB: Acknowledgements
-        WorkerB->>DB: Guarded short finalize transactions
+    par Publish Event A outside a DB transaction
+        WorkerA->>Kafka: Publish Event A
+        Kafka-->>WorkerA: Acknowledgement
+        WorkerA->>DB: Guarded short finalize transaction
+    and Publish Event B outside a DB transaction
+        WorkerB->>Kafka: Publish Event B
+        Kafka-->>WorkerB: Acknowledgement
+        WorkerB->>DB: Guarded short finalize transaction
     end
     Note over WorkerA,DB: An abandoned PROCESSING lease becomes claimable after claimLease
 ```
@@ -274,8 +475,9 @@ sequenceDiagram
     else Separate asynchronous-delivery inspection
         Probe->>Actuator: GET /actuator/outbox
         Actuator->>Outbox: snapshot()
-        Outbox->>DB: Count PENDING / PROCESSING / FAILED and find oldest unpublished
-        DB-->>Outbox: Delivery state
+        Outbox->>DB: One aggregate query for all counts and oldest timestamps
+        DB-->>Outbox: One point-in-time delivery-state row
+        Note over Outbox,DB: Publishable age uses createdAt, and quarantine age uses quarantinedAt
         Outbox-->>Probe: Counts, age in seconds, and checkedAt
     end
 ```
@@ -290,8 +492,8 @@ sequenceDiagram
     participant DB as PostgreSQL
 
     Operator->>PSQL: Query outbox_events
-    PSQL->>DB: SELECT id, aggregate_id, status, retry_count, last_error, published_at
-    DB-->>PSQL: Retained PENDING / PROCESSING / PUBLISHED / FAILED rows
+    PSQL->>DB: SELECT status, retry/error, claim/publication, and quarantine evidence
+    DB-->>PSQL: Retained PENDING / PROCESSING / PUBLISHED / QUARANTINED rows
     PSQL-->>Operator: Mutable operational and diagnostic view
     Note over Operator,DB: Current scope is read-only SQL with no operator HTTP API or replay command
 ```
@@ -395,17 +597,20 @@ sequenceDiagram
     Make->>Simulator: Start unique run prefix
     alt Smoke mode
         Simulator->>API: Sequential valid creates, duplicate, invalid create, normalize success/failure, GET
+        Simulator->>API: Retired V1 request expecting 410 and no durable state
     else Load mode
         Simulator->>API: Concurrent unique valid creates and intentional invalid creates
         Simulator->>API: Duplicate probe and normalization probe
     end
     API-->>Simulator: Expected 2xx and intentional 4xx responses
+    Simulator->>API: Submit successful normalized body unchanged to create
+    API-->>Simulator: Canonical transaction with server-owned fields
     Poller->>Kafka: Publish successful create events asynchronously
-    Simulator->>DB: Poll exact prefix counts and PUBLISHED outbox counts
-    DB-->>Simulator: Expected records and events settled
+    Simulator->>DB: Read full transaction, fingerprint, outbox row, and stored payload by exact prefix
+    DB-->>Simulator: Every expected row is PUBLISHED and no extra or duplicate row exists
     Simulator->>Kafka: Consume keys and values from beginning, then filter unique prefix
     Kafka-->>Simulator: Matching versioned TRANSACTION_CREATED occurrences
-    Simulator->>Simulator: Validate key, envelope, event ID, and exact canonical body
+    Simulator->>Simulator: Correlate every HTTP, DB, outbox payload, Kafka key, event ID, and body field
     Simulator->>Simulator: Permit same-event repeats and reject contradictory creation IDs
     Simulator->>Simulator: Enforce expected statuses and configurable load bounds
     Simulator-->>Initiator: Exit 0 on complete match and non-zero on any mismatch
@@ -449,7 +654,7 @@ sequenceDiagram
     Note over Security,Telemetry: Planned design where credential format, policy engine, and key/token service remain unselected
 ```
 
-### UC-P04 — Planned operator replay of a FAILED event
+### UC-P04 — Planned operator expedite of a persistent retry
 
 ```mermaid
 sequenceDiagram
@@ -457,30 +662,30 @@ sequenceDiagram
     actor Operator as Authorized operator
     participant Ops as Planned operator API / CLI
     participant Auth as Authorization policy
-    participant Replay as Planned replay service
+    participant RetryControl as Planned retry-control service
     participant DB as PostgreSQL
     participant Poller as Existing outbox poller
     participant Kafka as Kafka
 
-    Operator->>Ops: Replay FAILED event + reason
-    Ops->>Auth: Verify replay permission
+    Operator->>Ops: Expedite persistent retry + reason
+    Ops->>Auth: Verify delivery-control permission
     alt Permission denied
         Auth-->>Operator: Reject with no state change
     else Permission granted
-        Ops->>Replay: replay(eventId, principal, reason)
-        Replay->>DB: Lock event and require status=FAILED
-        alt Event is not FAILED or already replayed concurrently
-            DB-->>Replay: Not eligible
-            Replay-->>Operator: Conflict with no state change
-        else FAILED event is eligible
-            Replay->>DB: Audit replay decision and reset same eventId to due PENDING
-            DB-->>Replay: Commit
-            Replay-->>Operator: Replay accepted
+        Ops->>RetryControl: expedite(eventId, principal, reason)
+        RetryControl->>DB: Lock event and require retrying PENDING state
+        alt Event is published, actively claimed, or has never failed
+            DB-->>RetryControl: Not eligible
+            RetryControl-->>Operator: Conflict with no state change
+        else Persistently failing PENDING event is eligible
+            RetryControl->>DB: Audit decision and set existing event due now
+            DB-->>RetryControl: Commit
+            RetryControl-->>Operator: Retry expedite accepted
             Poller->>DB: Claim due PENDING event
             Poller->>Kafka: Publish using existing at-least-once flow
         end
     end
-    Note over Replay,Kafka: Keeping eventId preserves the existing consumer idempotency contract
+    Note over RetryControl,Kafka: Keeping eventId preserves the existing consumer idempotency contract
 ```
 
 ### UC-P05 — Planned archival of old PUBLISHED events
@@ -495,7 +700,7 @@ sequenceDiagram
 
     Scheduler->>ArchiveJob: Run with retention cutoff and bounded batch size
     ArchiveJob->>DB: Select PUBLISHED rows older than cutoff
-    DB-->>ArchiveJob: Batch containing no PENDING or FAILED rows
+    DB-->>ArchiveJob: Batch containing no PENDING or PROCESSING rows
     ArchiveJob->>Archive: Write immutable records + integrity metadata
     alt Archive write or verification fails
         Archive-->>ArchiveJob: Failure / mismatch
@@ -524,7 +729,7 @@ sequenceDiagram
     API->>DB: Business transaction
     DB-->>API: Commit or database error
     API->>Collector: Correlated request/database timing and error metrics without sensitive values
-    Poller->>Collector: Backlog age, batch, retry, and FAILED metrics
+    Poller->>Collector: Backlog age, claim, retry-count, and publish metrics
     Poller->>Kafka: Publish event
     Kafka-->>Poller: Broker acknowledgement or failure
     Poller->>Collector: Publish outcome and latency metric
@@ -559,4 +764,43 @@ sequenceDiagram
         CI->>Deploy: Allow versioned producer deployment
         Deploy-->>Developer: Gate passed
     end
+```
+
+### UC-P08 — Planned quarantined-payload compatibility review
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor Operator as Authorized operator
+    participant Tool as Planned compatibility tool
+    participant Auth as Authorization policy
+    participant DB as PostgreSQL
+    participant Validator as Versioned schema validator / transformer
+    participant Audit as Approved audit store
+    participant Poller as Existing V2 outbox poller
+    participant Kafka as Kafka broker
+
+    Operator->>Tool: Select quarantined event + reason + proposed action
+    Tool->>Auth: Verify compatibility-review permission and principal
+    alt Permission denied
+        Auth-->>Operator: Reject with no state change
+    else Authorized
+        Tool->>DB: Read and lock QUARANTINED evidence
+        DB-->>Tool: Original payload, identity, prior status, and diagnostics
+        Tool->>Validator: Parse declared/historical schema and validate explicit V2 transform
+        alt Schema unknown, transform lossy, or policy unresolved
+            Validator-->>Tool: Reject with diagnostic reason
+            Tool->>Audit: Record denied review while original remains QUARANTINED
+            Tool-->>Operator: No replacement created
+        else Reviewed transformation is valid
+            Validator-->>Tool: Canonical V2 payload + compatibility evidence
+            Tool->>Audit: Record actor, reason, original hash/ID, transform version, and event-ID policy
+            Tool->>DB: Preserve original and atomically insert causally linked PENDING V2 replacement
+            DB-->>Tool: Commit replacement identity
+            Tool-->>Operator: Reviewed replacement accepted
+            Poller->>DB: Claim replacement through ordinary V2 flow
+            Poller->>Kafka: Publish schema-version-2 replacement
+        end
+    end
+    Note over Tool,Kafka: Exact event-ID and consumer-dedup semantics require approval before implementation
 ```

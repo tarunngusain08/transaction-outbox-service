@@ -60,6 +60,15 @@ public class OutboxEvent {
     @Column(name = "claimed_at")
     private Instant claimedAt;
 
+    @Column(name = "quarantined_at")
+    private Instant quarantinedAt;
+
+    @Column(name = "quarantine_reason", length = MAX_ERROR_LENGTH)
+    private String quarantineReason;
+
+    @Column(name = "quarantined_from_status", length = 12)
+    private String quarantinedFromStatus;
+
     protected OutboxEvent() {
     }
 
@@ -101,16 +110,12 @@ public class OutboxEvent {
         clearClaim();
     }
 
-    public void recordFailure(String error, Instant failedAt, int maxRetries) {
-        retryCount++;
+    public void recordFailure(String error, Instant failedAt) {
+        if (retryCount < Integer.MAX_VALUE) {
+            retryCount++;
+        }
         lastError = truncate(error);
         clearClaim();
-
-        if (retryCount >= maxRetries) {
-            status = OutboxStatus.FAILED;
-            nextAttemptAt = failedAt;
-            return;
-        }
 
         long backoffSeconds = Math.min(300, 1L << Math.min(retryCount - 1, 30));
         status = OutboxStatus.PENDING;
@@ -133,8 +138,16 @@ public class OutboxEvent {
         return id;
     }
 
+    public String getAggregateType() {
+        return aggregateType;
+    }
+
     public UUID getAggregateId() {
         return aggregateId;
+    }
+
+    public String getEventType() {
+        return eventType;
     }
 
     public String getPayload() {
@@ -143,6 +156,10 @@ public class OutboxEvent {
 
     public OutboxStatus getStatus() {
         return status;
+    }
+
+    public Instant getCreatedAt() {
+        return createdAt;
     }
 
     public Instant getPublishedAt() {
@@ -167,5 +184,17 @@ public class OutboxEvent {
 
     public Instant getClaimedAt() {
         return claimedAt;
+    }
+
+    public Instant getQuarantinedAt() {
+        return quarantinedAt;
+    }
+
+    public String getQuarantineReason() {
+        return quarantineReason;
+    }
+
+    public String getQuarantinedFromStatus() {
+        return quarantinedFromStatus;
     }
 }

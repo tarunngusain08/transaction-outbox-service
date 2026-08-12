@@ -1,5 +1,6 @@
 package io.github.tarunngusain08.payments.outbox;
 
+import org.apache.kafka.common.errors.InterruptException;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.kafka.core.KafkaTemplate;
@@ -55,11 +56,28 @@ public class OutboxEventDelivery {
             return result;
         } catch (InterruptedException exception) {
             Thread.currentThread().interrupt();
-            recordFailure(event, exception);
+            log.info(
+                    "Kafka publishing interrupted for outbox event {}; lease recovery retained",
+                    event.eventId()
+            );
+            return OutboxDeliveryResult.INTERRUPTED;
+        } catch (InterruptException exception) {
+            Thread.currentThread().interrupt();
+            log.info(
+                    "Kafka producer interrupted for outbox event {}; lease recovery retained",
+                    event.eventId()
+            );
             return OutboxDeliveryResult.INTERRUPTED;
         } catch (ExecutionException | TimeoutException exception) {
             return recordFailure(event, exception);
         } catch (RuntimeException exception) {
+            if (Thread.currentThread().isInterrupted()) {
+                log.info(
+                        "Kafka publishing interrupted for outbox event {}; lease recovery retained",
+                        event.eventId()
+                );
+                return OutboxDeliveryResult.INTERRUPTED;
+            }
             return recordFailure(event, exception);
         }
     }
@@ -67,13 +85,7 @@ public class OutboxEventDelivery {
     private OutboxDeliveryResult recordFailure(ClaimedOutboxEvent event, Exception exception) {
         var result = finalizer.recordFailure(event, rootMessage(exception), Instant.now(clock));
 
-        if (result == OutboxDeliveryResult.PERMANENTLY_FAILED) {
-            log.error(
-                    "Outbox event {} exhausted Kafka publishing attempts",
-                    event.eventId(),
-                    exception
-            );
-        } else if (result == OutboxDeliveryResult.RETRY_SCHEDULED) {
+        if (result == OutboxDeliveryResult.RETRY_SCHEDULED) {
             log.warn("Kafka publishing failed for outbox event {}; retry scheduled", event.eventId());
         } else {
             log.warn("Ignored stale failure result for outbox event {}", event.eventId());

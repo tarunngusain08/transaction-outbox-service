@@ -11,20 +11,31 @@ public class OutboxPublisher {
 
     private final OutboxEventClaimService claimService;
     private final OutboxEventDelivery delivery;
+    private final OutboxProperties properties;
 
     public OutboxPublisher(
             OutboxEventClaimService claimService,
-            OutboxEventDelivery delivery
+            OutboxEventDelivery delivery,
+            OutboxProperties properties
     ) {
         this.claimService = claimService;
         this.delivery = delivery;
+        this.properties = properties;
     }
 
     public void publishPendingBatch() {
-        var claimedEvents = claimService.claimBatch();
+        for (int delivered = 0; delivered < properties.batchSize(); delivered++) {
+            if (Thread.currentThread().isInterrupted()) {
+                log.info("Stopping outbox batch before claiming more work after interruption");
+                return;
+            }
 
-        for (var event : claimedEvents) {
             try {
+                var claim = claimService.claimNext();
+                if (claim.isEmpty()) {
+                    return;
+                }
+                var event = claim.orElseThrow();
                 var result = delivery.deliver(event);
                 if (result == OutboxDeliveryResult.INTERRUPTED
                         || Thread.currentThread().isInterrupted()) {
@@ -32,11 +43,8 @@ public class OutboxPublisher {
                     return;
                 }
             } catch (RuntimeException exception) {
-                log.error("Unexpected failure while processing outbox event {}", event.eventId(), exception);
-                if (Thread.currentThread().isInterrupted()) {
-                    log.info("Stopping outbox batch after publisher interruption");
-                    return;
-                }
+                log.error("Unexpected failure while claiming or processing an outbox event", exception);
+                return;
             }
         }
     }

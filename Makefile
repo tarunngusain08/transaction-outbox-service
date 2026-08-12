@@ -11,7 +11,7 @@ LOAD_MIN_THROUGHPUT ?= 1
 LOAD_MAX_P95_MS ?= 3000
 CHROME_BIN ?= $(shell command -v google-chrome 2>/dev/null || command -v chromium 2>/dev/null || command -v chromium-browser 2>/dev/null || { test -x "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" && echo "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"; })
 
-.PHONY: help build run stop reset logs clean unit-test integration-test test lint docs-lint coverage traffic load-test check
+.PHONY: help build run stop reset logs clean unit-test integration-test test lint docs-lint coverage migration-preflight migration-v7-preflight traffic load-test check
 
 help: ## Show the available local workflows.
 	@awk 'BEGIN {FS = ":.*## "; printf "Usage: make <target>\n\nTargets:\n"} /^[a-zA-Z_-]+:.*## / {printf "  %-18s %s\n", $$1, $$2}' $(MAKEFILE_LIST)
@@ -36,10 +36,10 @@ clean: ## Remove Maven build output.
 	$(MVNW) $(MAVEN_FLAGS) clean
 
 unit-test: ## Run fast unit tests only.
-	$(MVNW) $(MAVEN_FLAGS) test -DskipIntegrationTests=true
+	$(MVNW) $(MAVEN_FLAGS) clean test -DskipIntegrationTests=true
 
 integration-test: ## Run PostgreSQL/Kafka Testcontainers integration tests only.
-	$(MVNW) $(MAVEN_FLAGS) verify -DskipUnitTests=true -Djacoco.skip=true
+	$(MVNW) $(MAVEN_FLAGS) clean verify -DskipUnitTests=true -Djacoco.skip=true
 
 test: ## Run all unit and integration tests.
 	$(MVNW) $(MAVEN_FLAGS) clean verify
@@ -55,6 +55,14 @@ docs-lint: ## Reproduce Markdown, link, traceability, and Mermaid checks.
 
 coverage: ## Run all tests and enforce the JaCoCo coverage threshold.
 	$(MVNW) $(MAVEN_FLAGS) clean verify
+
+migration-preflight: ## Read-only V2 identity/currency worklist before applying V3.
+	docker compose up --detach --wait postgres
+	docker compose exec -T postgres psql -X -U payments -d payments < scripts/sql/preflight_v3_transaction_identity.sql
+
+migration-v7-preflight: ## Fail unless canonical V6 has zero unpublished events.
+	docker compose up --detach --wait postgres
+	docker compose exec -T postgres psql -X -U payments -d payments < scripts/sql/preflight_v7_event_compatibility.sql
 
 traffic: run ## Send mixed success/failure traffic and verify database/Kafka delivery.
 	python3 scripts/traffic_simulator.py --mode smoke --base-url http://localhost:$(APP_PORT)

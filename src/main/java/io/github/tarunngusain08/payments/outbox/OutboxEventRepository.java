@@ -7,11 +7,27 @@ import org.springframework.data.jpa.repository.Query;
 import org.springframework.data.repository.query.Param;
 
 import java.time.Instant;
-import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
 
 public interface OutboxEventRepository extends JpaRepository<OutboxEvent, UUID> {
+
+    String DELIVERY_STATE_SUMMARY_SQL = """
+            SELECT
+                COUNT(*) FILTER (WHERE status = 'PENDING') AS pending,
+                COUNT(*) FILTER (WHERE status = 'PROCESSING') AS processing,
+                COUNT(*) FILTER (WHERE status = 'QUARANTINED') AS quarantined,
+                MIN(created_at) FILTER (
+                    WHERE status IN ('PENDING', 'PROCESSING')
+                ) AS "oldestUnpublishedAt",
+                MIN(quarantined_at) FILTER (
+                    WHERE status = 'QUARANTINED'
+                ) AS "oldestQuarantinedAt"
+            FROM outbox_events
+            WHERE status = 'PENDING'
+               OR status = 'PROCESSING'
+               OR status = 'QUARANTINED'
+            """;
 
     @Query(value = """
             SELECT id
@@ -19,22 +35,18 @@ public interface OutboxEventRepository extends JpaRepository<OutboxEvent, UUID> 
             WHERE (status = 'PENDING' AND next_attempt_at <= :now)
                OR (status = 'PROCESSING' AND claimed_at <= :expiredBefore)
             ORDER BY created_at
-            LIMIT :batchSize
+            LIMIT 1
             FOR UPDATE SKIP LOCKED
             """, nativeQuery = true)
-    List<UUID> findClaimableEventIds(
+    Optional<UUID> findNextClaimableEventId(
             @Param("now") Instant now,
-            @Param("expiredBefore") Instant expiredBefore,
-            @Param("batchSize") int batchSize
+            @Param("expiredBefore") Instant expiredBefore
     );
 
     @Lock(LockModeType.PESSIMISTIC_WRITE)
     @Query("SELECT event FROM OutboxEvent event WHERE event.id = :id")
     Optional<OutboxEvent> findByIdForUpdate(@Param("id") UUID id);
 
-    long countByStatus(OutboxStatus status);
-
-    @Query("SELECT MIN(event.createdAt) FROM OutboxEvent event "
-            + "WHERE event.status IN :statuses")
-    Instant findOldestCreatedAtByStatusIn(@Param("statuses") List<OutboxStatus> statuses);
+    @Query(value = DELIVERY_STATE_SUMMARY_SQL, nativeQuery = true)
+    OutboxDeliveryState summarizeDeliveryState();
 }

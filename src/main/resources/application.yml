@@ -36,6 +36,7 @@ payments:
     topic: ${PAYMENTS_KAFKA_TOPIC:payments.transactions.created}
     poll-delay: ${OUTBOX_POLL_DELAY:1s}
     batch-size: ${OUTBOX_BATCH_SIZE:50}
-    max-retries: ${OUTBOX_MAX_RETRIES:8}
     publish-timeout: ${OUTBOX_PUBLISH_TIMEOUT:10s}
+    producer-max-block: ${KAFKA_MAX_BLOCK_MS:10000}ms
     claim-lease: ${OUTBOX_CLAIM_LEASE:30s}
+    claim-safety-margin: ${OUTBOX_CLAIM_SAFETY_MARGIN:5s}

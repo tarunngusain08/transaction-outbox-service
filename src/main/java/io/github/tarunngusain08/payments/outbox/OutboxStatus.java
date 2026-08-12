@@ -4,5 +4,5 @@ public enum OutboxStatus {
     PENDING,
     PROCESSING,
     PUBLISHED,
-    FAILED
+    QUARANTINED
 }

@@ -6,7 +6,6 @@ import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
 import java.time.ZoneOffset;
-import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
 
@@ -22,8 +21,8 @@ class OutboxEventClaimServiceTest {
     void claimsSelectedEventsWithAnExpiringOwnershipToken() {
         var repository = mock(OutboxEventRepository.class);
         var event = pendingEvent();
-        when(repository.findClaimableEventIds(NOW, NOW.minusSeconds(30), 50))
-                .thenReturn(List.of(event.getId()));
+        when(repository.findNextClaimableEventId(NOW, NOW.minusSeconds(30)))
+                .thenReturn(Optional.of(event.getId()));
         when(repository.findById(event.getId())).thenReturn(Optional.of(event));
         var service = new OutboxEventClaimService(
                 repository,
@@ -31,13 +30,36 @@ class OutboxEventClaimServiceTest {
                 Clock.fixed(NOW, ZoneOffset.UTC)
         );
 
-        var claimed = service.claimBatch();
+        var claimed = service.claimNext();
 
-        assertThat(claimed).hasSize(1);
+        assertThat(claimed).isPresent();
         assertThat(event.getStatus()).isEqualTo(OutboxStatus.PROCESSING);
         assertThat(event.getClaimedAt()).isEqualTo(NOW);
-        assertThat(event.getClaimToken()).isEqualTo(claimed.getFirst().claimToken());
-        assertThat(event.isClaimedBy(claimed.getFirst().claimToken())).isTrue();
+        assertThat(event.getClaimToken()).isEqualTo(claimed.orElseThrow().claimToken());
+        assertThat(event.isClaimedBy(claimed.orElseThrow().claimToken())).isTrue();
+    }
+
+    @Test
+    void reclaimsAnExpiredInterruptedLeaseWithoutConsumingARetry() {
+        var repository = mock(OutboxEventRepository.class);
+        var event = pendingEvent();
+        UUID interruptedToken = UUID.randomUUID();
+        event.claim(interruptedToken, NOW.minusSeconds(31));
+        when(repository.findNextClaimableEventId(NOW, NOW.minusSeconds(30)))
+                .thenReturn(Optional.of(event.getId()));
+        when(repository.findById(event.getId())).thenReturn(Optional.of(event));
+        var service = new OutboxEventClaimService(
+                repository,
+                properties(),
+                Clock.fixed(NOW, ZoneOffset.UTC)
+        );
+
+        var reclaimed = service.claimNext().orElseThrow();
+
+        assertThat(reclaimed.claimToken()).isNotEqualTo(interruptedToken);
+        assertThat(event.getClaimToken()).isEqualTo(reclaimed.claimToken());
+        assertThat(event.getClaimedAt()).isEqualTo(NOW);
+        assertThat(event.getRetryCount()).isZero();
     }
 
     private OutboxProperties properties() {
@@ -45,9 +67,10 @@ class OutboxEventClaimServiceTest {
                 "payments.transactions.created",
                 Duration.ofSeconds(1),
                 50,
-                8,
                 Duration.ofSeconds(10),
-                Duration.ofSeconds(30)
+                Duration.ofSeconds(10),
+                Duration.ofSeconds(30),
+                Duration.ofSeconds(5)
         );
     }
 

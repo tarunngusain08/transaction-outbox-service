@@ -2,6 +2,8 @@ package io.github.tarunngusain08.payments.validation;
 
 import org.junit.jupiter.api.Test;
 
+import java.math.BigDecimal;
+import java.math.BigInteger;
 import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -44,5 +46,19 @@ class ValidMetadataValidatorTest {
                 "x".repeat(ValidMetadataValidator.MAX_STRING_BYTES + 1)
         ), null)).isFalse();
         assertThat(validator.isValid(oversizedEncodedValue, null)).isFalse();
+    }
+
+    @Test
+    void acceptsOnlySignedLongIntegerNumbersAndNonblankKeys() {
+        assertThat(validator.isValid(Map.of("minimum", Long.MIN_VALUE), null)).isTrue();
+        assertThat(validator.isValid(Map.of("maximum", BigInteger.valueOf(Long.MAX_VALUE)), null))
+                .isTrue();
+        assertThat(validator.isValid(Map.of("decimal", new BigDecimal("1.0")), null)).isFalse();
+        assertThat(validator.isValid(Map.of("floating", 1.0D), null)).isFalse();
+        assertThat(validator.isValid(Map.of(
+                "overflow",
+                BigInteger.valueOf(Long.MAX_VALUE).add(BigInteger.ONE)
+        ), null)).isFalse();
+        assertThat(validator.isValid(Map.of(" ", "value"), null)).isFalse();
     }
 }
