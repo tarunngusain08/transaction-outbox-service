@@ -4,12 +4,9 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.kafka.core.KafkaTemplate;
 import org.springframework.stereotype.Service;
-import org.springframework.transaction.annotation.Propagation;
-import org.springframework.transaction.annotation.Transactional;
 
 import java.time.Clock;
 import java.time.Instant;
-import java.util.UUID;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
@@ -19,48 +16,47 @@ public class OutboxEventDelivery {
 
     private static final Logger log = LoggerFactory.getLogger(OutboxEventDelivery.class);
 
-    private final OutboxEventRepository outboxRepository;
     private final KafkaTemplate<String, String> kafkaTemplate;
+    private final OutboxEventFinalizer finalizer;
     private final OutboxProperties properties;
     private final Clock clock;
 
     public OutboxEventDelivery(
-            OutboxEventRepository outboxRepository,
             KafkaTemplate<String, String> kafkaTemplate,
+            OutboxEventFinalizer finalizer,
             OutboxProperties properties,
             Clock clock
     ) {
-        this.outboxRepository = outboxRepository;
         this.kafkaTemplate = kafkaTemplate;
+        this.finalizer = finalizer;
         this.properties = properties;
         this.clock = clock;
     }
 
-    @Transactional(propagation = Propagation.REQUIRES_NEW)
-    public OutboxDeliveryResult deliver(UUID eventId) {
-        var event = outboxRepository.findByIdForUpdate(eventId).orElse(null);
-        Instant now = Instant.now(clock);
-
-        if (event == null
-                || event.getStatus() != OutboxStatus.PENDING
-                || event.getNextAttemptAt().isAfter(now)) {
-            return OutboxDeliveryResult.SKIPPED;
-        }
-
+    public OutboxDeliveryResult deliver(ClaimedOutboxEvent event) {
         try {
             kafkaTemplate.send(
                             properties.topic(),
-                            event.getAggregateId().toString(),
-                            event.getPayload()
+                            event.aggregateId().toString(),
+                            event.payload()
                     )
                     .get(properties.publishTimeout().toMillis(), TimeUnit.MILLISECONDS);
 
-            event.markPublished(Instant.now(clock));
-            log.info("Published outbox event {} for transaction {}", event.getId(), event.getAggregateId());
-            return OutboxDeliveryResult.PUBLISHED;
+            var result = finalizer.markPublished(event, Instant.now(clock));
+            if (result == OutboxDeliveryResult.PUBLISHED) {
+                log.info(
+                        "Published outbox event {} for transaction {}",
+                        event.eventId(),
+                        event.aggregateId()
+                );
+            } else {
+                log.warn("Ignored stale publication acknowledgement for outbox event {}", event.eventId());
+            }
+            return result;
         } catch (InterruptedException exception) {
             Thread.currentThread().interrupt();
-            return recordFailure(event, exception);
+            recordFailure(event, exception);
+            return OutboxDeliveryResult.INTERRUPTED;
         } catch (ExecutionException | TimeoutException exception) {
             return recordFailure(event, exception);
         } catch (RuntimeException exception) {
@@ -68,26 +64,22 @@ public class OutboxEventDelivery {
         }
     }
 
-    private OutboxDeliveryResult recordFailure(OutboxEvent event, Exception exception) {
-        event.recordFailure(rootMessage(exception), Instant.now(clock), properties.maxRetries());
+    private OutboxDeliveryResult recordFailure(ClaimedOutboxEvent event, Exception exception) {
+        var result = finalizer.recordFailure(event, rootMessage(exception), Instant.now(clock));
 
-        if (event.getStatus() == OutboxStatus.FAILED) {
+        if (result == OutboxDeliveryResult.PERMANENTLY_FAILED) {
             log.error(
-                    "Outbox event {} exhausted {} Kafka publishing attempts",
-                    event.getId(),
-                    event.getRetryCount(),
+                    "Outbox event {} exhausted Kafka publishing attempts",
+                    event.eventId(),
                     exception
             );
-            return OutboxDeliveryResult.PERMANENTLY_FAILED;
+        } else if (result == OutboxDeliveryResult.RETRY_SCHEDULED) {
+            log.warn("Kafka publishing failed for outbox event {}; retry scheduled", event.eventId());
+        } else {
+            log.warn("Ignored stale failure result for outbox event {}", event.eventId());
         }
 
-        log.warn(
-                "Kafka publishing failed for outbox event {}; retry {} scheduled at {}",
-                event.getId(),
-                event.getRetryCount(),
-                event.getNextAttemptAt()
-        );
-        return OutboxDeliveryResult.RETRY_SCHEDULED;
+        return result;
     }
 
     private String rootMessage(Exception exception) {

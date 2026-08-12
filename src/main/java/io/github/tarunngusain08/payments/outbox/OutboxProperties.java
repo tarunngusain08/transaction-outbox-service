@@ -15,6 +15,14 @@ public record OutboxProperties(
         @NotNull Duration pollDelay,
         @Min(1) int batchSize,
         @Min(1) int maxRetries,
-        @NotNull Duration publishTimeout
+        @NotNull Duration publishTimeout,
+        @NotNull Duration claimLease
 ) {
+    public OutboxProperties {
+        if (claimLease != null
+                && publishTimeout != null
+                && claimLease.compareTo(publishTimeout) <= 0) {
+            throw new IllegalArgumentException("claimLease must be longer than publishTimeout");
+        }
+    }
 }

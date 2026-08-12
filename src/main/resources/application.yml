@@ -9,6 +9,12 @@ spring:
     open-in-view: false
     hibernate:
       ddl-auto: validate
+  jackson:
+    deserialization:
+      accept-float-as-int: false
+      fail-on-unknown-properties: true
+    mapper:
+      allow-coercion-of-scalars: false
   kafka:
     bootstrap-servers: ${KAFKA_BOOTSTRAP_SERVERS:localhost:9092}
     producer:
@@ -17,12 +23,13 @@ spring:
       acks: all
       properties:
         enable.idempotence: true
+        max.block.ms: ${KAFKA_MAX_BLOCK_MS:10000}
 
 management:
   endpoints:
     web:
       exposure:
-        include: health,info
+        include: health,info,outbox
 
 payments:
   outbox:
@@ -31,3 +38,4 @@ payments:
     batch-size: ${OUTBOX_BATCH_SIZE:50}
     max-retries: ${OUTBOX_MAX_RETRIES:8}
     publish-timeout: ${OUTBOX_PUBLISH_TIMEOUT:10s}
+    claim-lease: ${OUTBOX_CLAIM_LEASE:30s}

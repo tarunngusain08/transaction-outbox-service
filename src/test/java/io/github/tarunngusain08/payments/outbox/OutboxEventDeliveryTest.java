@@ -1,23 +1,23 @@
 package io.github.tarunngusain08.payments.outbox;
 
 import org.apache.kafka.common.KafkaException;
+import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 import org.springframework.kafka.core.KafkaTemplate;
+import org.springframework.transaction.annotation.Transactional;
 
 import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
 import java.time.ZoneOffset;
-import java.util.Optional;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 
 import static org.assertj.core.api.Assertions.assertThat;
-import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -28,12 +28,17 @@ class OutboxEventDeliveryTest {
     private static final String TOPIC = "payments.transactions.created";
 
     @Mock
-    private OutboxEventRepository outboxRepository;
-
-    @Mock
     private KafkaTemplate<String, String> kafkaTemplate;
 
+    @Mock
+    private OutboxEventFinalizer finalizer;
+
     private OutboxEventDelivery delivery;
+
+    @AfterEach
+    void clearInterruptFlag() {
+        Thread.interrupted();
+    }
 
     @BeforeEach
     void setUp() {
@@ -42,81 +47,89 @@ class OutboxEventDeliveryTest {
                 Duration.ofSeconds(1),
                 50,
                 3,
-                Duration.ofSeconds(2)
+                Duration.ofSeconds(2),
+                Duration.ofSeconds(10)
         );
         delivery = new OutboxEventDelivery(
-                outboxRepository,
                 kafkaTemplate,
+                finalizer,
                 properties,
                 Clock.fixed(NOW, ZoneOffset.UTC)
         );
     }
 
     @Test
-    void marksEventPublishedOnlyAfterKafkaAcknowledgement() {
-        var event = pendingEvent();
-        when(outboxRepository.findByIdForUpdate(event.getId())).thenReturn(Optional.of(event));
-        when(kafkaTemplate.send(TOPIC, event.getAggregateId().toString(), event.getPayload()))
-                .thenReturn(CompletableFuture.completedFuture(null));
+    void kafkaDeliveryMethodDoesNotOpenADatabaseTransaction() throws NoSuchMethodException {
+        var method = OutboxEventDelivery.class.getMethod("deliver", ClaimedOutboxEvent.class);
 
-        var result = delivery.deliver(event.getId());
-
-        assertThat(result).isEqualTo(OutboxDeliveryResult.PUBLISHED);
-        assertThat(event.getStatus()).isEqualTo(OutboxStatus.PUBLISHED);
-        assertThat(event.getPublishedAt()).isEqualTo(NOW);
+        assertThat(method.getAnnotation(Transactional.class)).isNull();
     }
 
     @Test
-    void leavesEventPendingAndSchedulesRetryWhenKafkaFails() {
-        var event = pendingEvent();
+    void marksEventPublishedOnlyAfterKafkaAcknowledgement() {
+        var event = claimedEvent();
+        when(kafkaTemplate.send(TOPIC, event.aggregateId().toString(), event.payload()))
+                .thenReturn(CompletableFuture.completedFuture(null));
+        when(finalizer.markPublished(event, NOW)).thenReturn(OutboxDeliveryResult.PUBLISHED);
+
+        var result = delivery.deliver(event);
+
+        assertThat(result).isEqualTo(OutboxDeliveryResult.PUBLISHED);
+        verify(finalizer).markPublished(event, NOW);
+    }
+
+    @Test
+    void schedulesRetryWhenKafkaAcknowledgementFails() {
+        var event = claimedEvent();
         var failedSend = new CompletableFuture<org.springframework.kafka.support.SendResult<String, String>>();
         failedSend.completeExceptionally(new KafkaException("broker unavailable"));
-        when(outboxRepository.findByIdForUpdate(event.getId())).thenReturn(Optional.of(event));
-        when(kafkaTemplate.send(TOPIC, event.getAggregateId().toString(), event.getPayload()))
+        when(kafkaTemplate.send(TOPIC, event.aggregateId().toString(), event.payload()))
                 .thenReturn(failedSend);
+        when(finalizer.recordFailure(event, "broker unavailable", NOW))
+                .thenReturn(OutboxDeliveryResult.RETRY_SCHEDULED);
 
-        var result = delivery.deliver(event.getId());
+        var result = delivery.deliver(event);
 
         assertThat(result).isEqualTo(OutboxDeliveryResult.RETRY_SCHEDULED);
-        assertThat(event.getStatus()).isEqualTo(OutboxStatus.PENDING);
-        assertThat(event.getRetryCount()).isEqualTo(1);
-        assertThat(event.getNextAttemptAt()).isEqualTo(NOW.plusSeconds(1));
-        assertThat(event.getLastError()).isEqualTo("broker unavailable");
+        verify(finalizer).recordFailure(event, "broker unavailable", NOW);
     }
 
     @Test
     void schedulesRetryWhenProducerFailsBeforeReturningFuture() {
-        var event = pendingEvent();
-        when(outboxRepository.findByIdForUpdate(event.getId())).thenReturn(Optional.of(event));
-        when(kafkaTemplate.send(TOPIC, event.getAggregateId().toString(), event.getPayload()))
+        var event = claimedEvent();
+        when(kafkaTemplate.send(TOPIC, event.aggregateId().toString(), event.payload()))
                 .thenThrow(new KafkaException("producer unavailable"));
+        when(finalizer.recordFailure(event, "producer unavailable", NOW))
+                .thenReturn(OutboxDeliveryResult.RETRY_SCHEDULED);
 
-        var result = delivery.deliver(event.getId());
+        var result = delivery.deliver(event);
 
         assertThat(result).isEqualTo(OutboxDeliveryResult.RETRY_SCHEDULED);
-        assertThat(event.getRetryCount()).isEqualTo(1);
-        assertThat(event.getLastError()).isEqualTo("producer unavailable");
+        verify(finalizer).recordFailure(event, "producer unavailable", NOW);
     }
 
     @Test
-    void skipsAlreadyPublishedEvent() {
-        var event = pendingEvent();
-        event.markPublished(NOW);
-        when(outboxRepository.findByIdForUpdate(event.getId())).thenReturn(Optional.of(event));
+    void reportsInterruptionAndKeepsTheThreadInterrupted() {
+        var event = claimedEvent();
+        when(kafkaTemplate.send(TOPIC, event.aggregateId().toString(), event.payload()))
+                .thenReturn(new CompletableFuture<>());
+        when(finalizer.recordFailure(event, "InterruptedException", NOW))
+                .thenReturn(OutboxDeliveryResult.RETRY_SCHEDULED);
+        Thread.currentThread().interrupt();
 
-        assertThat(delivery.deliver(event.getId())).isEqualTo(OutboxDeliveryResult.SKIPPED);
+        var result = delivery.deliver(event);
 
-        verify(kafkaTemplate, never()).send(TOPIC, event.getAggregateId().toString(), event.getPayload());
+        assertThat(result).isEqualTo(OutboxDeliveryResult.INTERRUPTED);
+        assertThat(Thread.currentThread().isInterrupted()).isTrue();
+        verify(finalizer).recordFailure(event, "InterruptedException", NOW);
     }
 
-    private OutboxEvent pendingEvent() {
-        return OutboxEvent.pending(
+    private ClaimedOutboxEvent claimedEvent() {
+        return new ClaimedOutboxEvent(
                 UUID.randomUUID(),
-                "TRANSACTION",
                 UUID.randomUUID(),
-                "TRANSACTION_CREATED",
                 "{\"eventType\":\"TRANSACTION_CREATED\"}",
-                NOW
+                UUID.randomUUID()
         );
     }
 }

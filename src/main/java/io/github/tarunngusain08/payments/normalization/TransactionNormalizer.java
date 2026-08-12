@@ -5,6 +5,7 @@ import io.github.tarunngusain08.payments.transaction.PaymentChannel;
 import io.github.tarunngusain08.payments.transaction.TransactionStatus;
 import io.github.tarunngusain08.payments.transaction.TransactionType;
 import io.github.tarunngusain08.payments.transaction.api.TransactionResponse;
+import io.github.tarunngusain08.payments.validation.CurrencySupport;
 import org.springframework.stereotype.Service;
 
 import java.math.BigDecimal;
@@ -50,7 +51,7 @@ public class TransactionNormalizer {
     long toMinorUnits(String rawAmount, String currencyCode) {
         final Currency currency;
         try {
-            currency = Currency.getInstance(currencyCode);
+            currency = CurrencySupport.resolve(currencyCode);
         } catch (IllegalArgumentException exception) {
             throw new NormalizationException("Unsupported ccy: " + currencyCode, exception);
         }

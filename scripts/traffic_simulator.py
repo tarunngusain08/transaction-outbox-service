@@ -15,6 +15,7 @@ import urllib.request
 import uuid
 from collections import Counter
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -133,14 +134,23 @@ def run_smoke(base_url: str, run_prefix: str) -> tuple[list[RequestResult], list
         )))
 
     first_response = json.loads(results[0].response_body) if results[0].actual_status == 201 else {}
+    if not isinstance(first_response, dict):
+        first_response = {}
     transaction_id = first_response.get("transactionId", "00000000-0000-0000-0000-000000000000")
     results.extend([
         send_request(base_url, RequestCase(
-            name="reject duplicate reference",
+            name="accept idempotent replay",
+            method="POST",
+            path=CREATE_PATH,
+            expected_status=200,
+            payload=canonical_payload(valid_references[0]),
+        )),
+        send_request(base_url, RequestCase(
+            name="reject conflicting replay",
             method="POST",
             path=CREATE_PATH,
             expected_status=409,
-            payload=canonical_payload(valid_references[0]),
+            payload=canonical_payload(valid_references[0], amount=999),
         )),
         send_request(base_url, RequestCase(
             name="reject non-positive amount",
@@ -206,15 +216,23 @@ def run_load(
     started = time.perf_counter()
     with concurrent.futures.ThreadPoolExecutor(max_workers=concurrency) as executor:
         results = list(executor.map(lambda case: send_request(base_url, case), cases))
+    primary_elapsed = time.perf_counter() - started
 
     if valid_references:
         duplicate_reference = valid_references[0]
         results.append(send_request(base_url, RequestCase(
-            name="reject duplicate after load",
+            name="accept idempotent replay after load",
+            method="POST",
+            path=CREATE_PATH,
+            expected_status=200,
+            payload=canonical_payload(duplicate_reference, amount=10_001),
+        )))
+        results.append(send_request(base_url, RequestCase(
+            name="reject conflicting replay after load",
             method="POST",
             path=CREATE_PATH,
             expected_status=409,
-            payload=canonical_payload(duplicate_reference, amount=10_001),
+            payload=canonical_payload(duplicate_reference, amount=999),
         )))
 
     results.append(send_request(base_url, RequestCase(
@@ -225,7 +243,7 @@ def run_load(
         payload=legacy_payload(f"{run_prefix}NORMALIZE"),
     )))
 
-    return results, valid_references, time.perf_counter() - started
+    return results, valid_references, primary_elapsed
 
 
 def database_counts(run_prefix: str) -> tuple[int, int]:
@@ -274,7 +292,24 @@ def wait_for_database(run_prefix: str, expected_count: int, timeout_seconds: int
     )
 
 
-def kafka_references(run_prefix: str) -> set[str]:
+def expected_transactions(results: list[RequestResult], run_prefix: str) -> dict[str, dict[str, Any]]:
+    expected: dict[str, dict[str, Any]] = {}
+    for result in results:
+        if result.case.path != CREATE_PATH or result.actual_status != 201:
+            continue
+        transaction = json.loads(result.response_body)
+        if not isinstance(transaction, dict):
+            raise RuntimeError("a successful create response was not a JSON object")
+        reference = transaction.get("externalReference", "")
+        if reference.startswith(run_prefix):
+            expected[reference] = transaction
+    return expected
+
+
+def kafka_events(
+        run_prefix: str,
+        expected: dict[str, dict[str, Any]],
+) -> tuple[dict[str, set[str]], int]:
     command = [
         "docker", "compose", "exec", "-T", "kafka",
         "/opt/kafka/bin/kafka-console-consumer.sh",
@@ -282,6 +317,8 @@ def kafka_references(run_prefix: str) -> set[str]:
         "--topic", TOPIC,
         "--from-beginning",
         "--timeout-ms", "5000",
+        "--property", "print.key=true",
+        "--property", "key.separator=\t",
     ]
     process = subprocess.run(
         command,
@@ -291,20 +328,57 @@ def kafka_references(run_prefix: str) -> set[str]:
         text=True,
         timeout=30,
     )
-    references: set[str] = set()
+    event_ids_by_reference: dict[str, set[str]] = {}
+    matching_occurrences = 0
 
     for line in process.stdout.splitlines():
+        key, separator, raw_event = line.partition("\t")
+        if not separator:
+            continue
         try:
-            event = json.loads(line)
+            event = json.loads(raw_event)
         except json.JSONDecodeError:
             continue
-        reference = event.get("transaction", {}).get("externalReference", "")
-        if reference.startswith(run_prefix):
-            references.add(reference)
+        if not isinstance(event, dict):
+            continue
+        transaction = event.get("transaction")
+        reference = transaction.get("externalReference", "") if isinstance(transaction, dict) else ""
+        if not reference.startswith(run_prefix):
+            continue
 
-    if not references and process.returncode != 0:
+        matching_occurrences += 1
+        if reference not in expected:
+            raise RuntimeError(f"Kafka contains an unexpected event for {reference}")
+        if transaction != expected[reference]:
+            raise RuntimeError(f"Kafka transaction payload differs from the HTTP response for {reference}")
+        expected_fields = {
+            "schemaVersion", "producer", "eventId", "eventType", "occurredAt", "transaction",
+        }
+        if set(event) != expected_fields:
+            raise RuntimeError(f"Kafka event fields differ from schema version 1 for {reference}")
+        if key != str(transaction.get("transactionId")):
+            raise RuntimeError(f"Kafka key does not match transactionId for {reference}")
+        if event.get("schemaVersion") != 1:
+            raise RuntimeError(f"Kafka schemaVersion is not 1 for {reference}")
+        if event.get("producer") != "transaction-outbox-service":
+            raise RuntimeError(f"Kafka producer identity is invalid for {reference}")
+        if event.get("eventType") != "TRANSACTION_CREATED":
+            raise RuntimeError(f"Kafka eventType is invalid for {reference}")
+        try:
+            occurred_at = datetime.fromisoformat(event["occurredAt"].replace("Z", "+00:00"))
+        except (AttributeError, KeyError, TypeError, ValueError) as error:
+            raise RuntimeError(f"Kafka occurredAt is invalid for {reference}") from error
+        if occurred_at.tzinfo is None:
+            raise RuntimeError(f"Kafka occurredAt has no UTC offset for {reference}")
+        try:
+            event_id = str(uuid.UUID(event["eventId"]))
+        except (KeyError, TypeError, ValueError) as error:
+            raise RuntimeError(f"Kafka eventId is invalid for {reference}") from error
+        event_ids_by_reference.setdefault(reference, set()).add(event_id)
+
+    if not event_ids_by_reference and process.returncode != 0:
         raise RuntimeError(f"Kafka verification failed: {process.stderr.strip()}")
-    return references
+    return event_ids_by_reference, matching_occurrences
 
 
 def percentile(values: list[float], percentage: int) -> float:
@@ -315,7 +389,7 @@ def percentile(values: list[float], percentage: int) -> float:
 
 def print_report(results: list[RequestResult], elapsed_seconds: float, primary_requests: int) -> None:
     status_counts = Counter(result.actual_status for result in results)
-    latencies = [result.latency_ms for result in results]
+    primary_latencies = [result.latency_ms for result in results[:primary_requests]]
     expected_failures = sum(result.case.expected_status >= 400 for result in results)
 
     print("\nHTTP results")
@@ -326,9 +400,9 @@ def print_report(results: list[RequestResult], elapsed_seconds: float, primary_r
     print(f"  Throughput: {primary_requests / elapsed_seconds:.2f} requests/second")
     print(
         "  Latency: "
-        f"p50={percentile(latencies, 50):.1f}ms "
-        f"p95={percentile(latencies, 95):.1f}ms "
-        f"p99={percentile(latencies, 99):.1f}ms"
+        f"p50={percentile(primary_latencies, 50):.1f}ms "
+        f"p95={percentile(primary_latencies, 95):.1f}ms "
+        f"p99={percentile(primary_latencies, 99):.1f}ms (primary requests only)"
     )
 
     failures = [result for result in results if not result.passed]
@@ -349,6 +423,8 @@ def parse_arguments() -> argparse.Namespace:
     parser.add_argument("--base-url", default="http://localhost:8080")
     parser.add_argument("--requests", type=int, default=100)
     parser.add_argument("--concurrency", type=int, default=10)
+    parser.add_argument("--min-throughput", type=float, default=0)
+    parser.add_argument("--max-p95-ms", type=float, default=0)
     parser.add_argument("--skip-pipeline-verification", action="store_true")
     arguments = parser.parse_args()
 
@@ -356,6 +432,10 @@ def parse_arguments() -> argparse.Namespace:
         parser.error("--requests must be at least 1")
     if arguments.concurrency < 1:
         parser.error("--concurrency must be at least 1")
+    if arguments.min_throughput < 0:
+        parser.error("--min-throughput cannot be negative")
+    if arguments.max_p95_ms < 0:
+        parser.error("--max-p95-ms cannot be negative")
     return arguments
 
 
@@ -383,20 +463,48 @@ def main() -> int:
         if any(not result.passed for result in results):
             return 1
 
+        if arguments.mode == "load":
+            throughput = primary_requests / elapsed
+            p95_ms = percentile(
+                [result.latency_ms for result in results[:primary_requests]],
+                95,
+            )
+            if arguments.min_throughput and throughput < arguments.min_throughput:
+                raise RuntimeError(
+                    f"throughput {throughput:.2f} req/s is below "
+                    f"{arguments.min_throughput:.2f} req/s"
+                )
+            if arguments.max_p95_ms and p95_ms > arguments.max_p95_ms:
+                raise RuntimeError(
+                    f"p95 latency {p95_ms:.1f}ms exceeds {arguments.max_p95_ms:.1f}ms"
+                )
+
         if not arguments.skip_pipeline_verification:
-            stored, published = wait_for_database(run_prefix, len(expected_references))
-            kafka_seen = kafka_references(run_prefix)
-            missing_references = set(expected_references) - kafka_seen
+            expected = expected_transactions(results, run_prefix)
+            if set(expected) != set(expected_references):
+                raise RuntimeError("successful HTTP responses do not match the expected references")
+            stored, published = wait_for_database(run_prefix, len(expected))
+            kafka_seen, kafka_occurrences = kafka_events(run_prefix, expected)
+            missing_references = set(expected) - set(kafka_seen)
             if missing_references:
                 sample = ", ".join(sorted(missing_references)[:5])
                 raise RuntimeError(
                     f"Kafka is missing {len(missing_references)} expected transaction event(s): {sample}"
                 )
+            contradictory_references = [
+                reference for reference, event_ids in kafka_seen.items() if len(event_ids) != 1
+            ]
+            if contradictory_references:
+                raise RuntimeError(
+                    "Kafka contains multiple creation event IDs for: "
+                    + ", ".join(sorted(contradictory_references)[:5])
+                )
 
             print("\nPipeline verification")
-            print(f"  PostgreSQL transactions: {stored}/{len(expected_references)}")
-            print(f"  Published outbox rows: {published}/{len(expected_references)}")
-            print(f"  Distinct Kafka events: {len(kafka_seen)}/{len(expected_references)}")
+            print(f"  PostgreSQL transactions: {stored}/{len(expected)}")
+            print(f"  Published outbox rows: {published}/{len(expected)}")
+            print(f"  Exact Kafka contracts: {len(kafka_seen)}/{len(expected)}")
+            print(f"  Kafka occurrences (at-least-once): {kafka_occurrences}")
 
         print("\nPASS: all expected HTTP outcomes and pipeline checks succeeded")
         return 0

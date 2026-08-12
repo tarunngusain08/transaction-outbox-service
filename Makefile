@@ -4,10 +4,14 @@ SHELL := /bin/bash
 MVNW := ./mvnw
 MAVEN_FLAGS ?= --batch-mode --no-transfer-progress
 IMAGE_NAME ?= transaction-outbox-service:local
+APP_PORT ?= 8080
 LOAD_REQUESTS ?= 100
 LOAD_CONCURRENCY ?= 10
+LOAD_MIN_THROUGHPUT ?= 1
+LOAD_MAX_P95_MS ?= 3000
+CHROME_BIN ?= $(shell command -v google-chrome 2>/dev/null || command -v chromium 2>/dev/null || command -v chromium-browser 2>/dev/null || { test -x "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" && echo "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"; })
 
-.PHONY: help build run stop logs clean unit-test integration-test test lint coverage traffic load-test check
+.PHONY: help build run stop reset logs clean unit-test integration-test test lint docs-lint coverage traffic load-test check
 
 help: ## Show the available local workflows.
 	@awk 'BEGIN {FS = ":.*## "; printf "Usage: make <target>\n\nTargets:\n"} /^[a-zA-Z_-]+:.*## / {printf "  %-18s %s\n", $$1, $$2}' $(MAKEFILE_LIST)
@@ -19,8 +23,11 @@ build: ## Build the executable JAR and local application image.
 run: ## Build and start the complete application, PostgreSQL, and Kafka stack.
 	docker compose up --detach --build --wait
 
-stop: ## Stop the local stack while retaining PostgreSQL data.
+stop: ## Stop the local stack while retaining PostgreSQL and Kafka data.
 	docker compose down
+
+reset: ## Stop the local stack and delete its PostgreSQL and Kafka volumes.
+	docker compose down --volumes
 
 logs: ## Follow application logs from the local stack.
 	docker compose logs --follow app
@@ -40,14 +47,19 @@ test: ## Run all unit and integration tests.
 lint: ## Run Java source checks.
 	$(MVNW) $(MAVEN_FLAGS) checkstyle:check
 	python3 -m py_compile scripts/traffic_simulator.py
+	python3 -m py_compile scripts/validate_docs.py
+
+docs-lint: ## Reproduce Markdown, link, traceability, and Mermaid checks.
+	PUPPETEER_SKIP_DOWNLOAD=true npm ci --no-audit --no-fund
+	PUPPETEER_EXECUTABLE_PATH="$(CHROME_BIN)" npm run docs:check
 
 coverage: ## Run all tests and enforce the JaCoCo coverage threshold.
 	$(MVNW) $(MAVEN_FLAGS) clean verify
 
 traffic: run ## Send mixed success/failure traffic and verify database/Kafka delivery.
-	python3 scripts/traffic_simulator.py --mode smoke
+	python3 scripts/traffic_simulator.py --mode smoke --base-url http://localhost:$(APP_PORT)
 
 load-test: run ## Run the configurable concurrent local load scenario.
-	python3 scripts/traffic_simulator.py --mode load --requests $(LOAD_REQUESTS) --concurrency $(LOAD_CONCURRENCY)
+	python3 scripts/traffic_simulator.py --mode load --base-url http://localhost:$(APP_PORT) --requests $(LOAD_REQUESTS) --concurrency $(LOAD_CONCURRENCY) --min-throughput $(LOAD_MIN_THROUGHPUT) --max-p95-ms $(LOAD_MAX_P95_MS)
 
-check: lint test build ## Run every local quality gate used before review.
+check: lint docs-lint test build ## Run repository-static checks, tests, and build gates.

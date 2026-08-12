@@ -4,39 +4,39 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
 
-import java.time.Clock;
-import java.time.Instant;
-
 @Service
 public class OutboxPublisher {
 
     private static final Logger log = LoggerFactory.getLogger(OutboxPublisher.class);
 
-    private final OutboxEventRepository outboxRepository;
+    private final OutboxEventClaimService claimService;
     private final OutboxEventDelivery delivery;
-    private final OutboxProperties properties;
-    private final Clock clock;
 
     public OutboxPublisher(
-            OutboxEventRepository outboxRepository,
-            OutboxEventDelivery delivery,
-            OutboxProperties properties,
-            Clock clock
+            OutboxEventClaimService claimService,
+            OutboxEventDelivery delivery
     ) {
-        this.outboxRepository = outboxRepository;
+        this.claimService = claimService;
         this.delivery = delivery;
-        this.properties = properties;
-        this.clock = clock;
     }
 
     public void publishPendingBatch() {
-        var eventIds = outboxRepository.findReadyEventIds(Instant.now(clock), properties.batchSize());
+        var claimedEvents = claimService.claimBatch();
 
-        for (var eventId : eventIds) {
+        for (var event : claimedEvents) {
             try {
-                delivery.deliver(eventId);
+                var result = delivery.deliver(event);
+                if (result == OutboxDeliveryResult.INTERRUPTED
+                        || Thread.currentThread().isInterrupted()) {
+                    log.info("Stopping outbox batch after publisher interruption");
+                    return;
+                }
             } catch (RuntimeException exception) {
-                log.error("Unexpected failure while processing outbox event {}", eventId, exception);
+                log.error("Unexpected failure while processing outbox event {}", event.eventId(), exception);
+                if (Thread.currentThread().isInterrupted()) {
+                    log.info("Stopping outbox batch after publisher interruption");
+                    return;
+                }
             }
         }
     }
