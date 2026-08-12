@@ -142,6 +142,11 @@ answers only application health.
 | `make traffic` | Mixed end-to-end API/DB/outbox/Kafka smoke scenario |
 | `make load-test LOAD_REQUESTS=250 LOAD_CONCURRENCY=20` | Concurrent local diagnostic scenario |
 
+CI runs the same static, test, build, smoke, and bounded-load gates. Dependency
+review blocks moderate-or-higher newly introduced vulnerabilities when the
+repository dependency graph is available; otherwise CI records an explicit
+skip notice instead of reporting a false failure.
+
 Load output is local diagnostic evidence only. It is not a production-capacity,
 availability, latency-SLO, HA, or disaster-recovery claim.
 
