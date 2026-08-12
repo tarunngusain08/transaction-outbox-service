@@ -1,5 +1,12 @@
 # Architecture notes
 
+## Documentation map
+
+- [Use-case model](use-cases.md) — actors, triggers, outcomes, status, and
+  implemented-versus-planned scope.
+- [Sequence-diagram catalog](sequence-diagrams.md) — runtime ordering, state
+  transitions, alternate flows, engineering workflows, and next-phase designs.
+
 ## Consistency boundary
 
 `TransactionService.create` is the business transaction boundary. It writes the
@@ -62,9 +69,17 @@ path without treating expected 4xx responses as test failures.
 
 ## Production follow-ups
 
-- Partition or archive old `PUBLISHED` rows according to audit-retention policy.
-- Add an operator-controlled replay path for `FAILED` events.
-- Encrypt or tokenize account identifiers and apply field-level log redaction.
-- Add authentication, authorization, rate limiting, and request tracing.
-- Add schema-registry compatibility checks for Kafka events.
-- Add broker/database telemetry and production SLO dashboards.
+The planned use cases below are specified in the
+[use-case model](use-cases.md#planned-next-phase-use-cases) and corresponding
+[sequence diagrams](sequence-diagrams.md#planned-next-phase-sequences). None is
+implemented yet.
+
+- UC-P01: authenticate and authorize API requests.
+- UC-P02: enforce deterministic request rate limits.
+- UC-P03: encrypt/tokenize account identifiers and redact sensitive logs.
+- UC-P04: add an auditable operator replay path for `FAILED` events.
+- UC-P05: archive/partition old `PUBLISHED` rows under a retention policy.
+- UC-P06: export correlated telemetry and provide production SLO dashboards and
+  alerts.
+- UC-P07: enforce schema-registry compatibility before event changes deploy.
+- UC-P08: claim disjoint outbox batches efficiently across high-volume workers.

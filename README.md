@@ -23,6 +23,13 @@ PostgreSQL and Kafka. Delivery is at least once, so consumers should deduplicate
 on `eventId`. Published outbox rows are retained for audit; an archival policy is
 called out as a production follow-up in [the architecture notes](docs/architecture.md).
 
+Detailed behavioral documentation:
+
+- [Use-case model](docs/use-cases.md) — complete implemented and planned scope,
+  with actors, triggers, outcomes, and explicit status.
+- [Sequence-diagram catalog](docs/sequence-diagrams.md) — success, rejection,
+  retry, concurrency, operations, testing, and next-phase interaction flows.
+
 ## Stack
 
 - Java 21 and Spring Boot 4.1
