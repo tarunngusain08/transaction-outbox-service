@@ -5,39 +5,38 @@ BEGIN TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY;
 \echo 'V7 canonical Flyway lineage check'
 DO $preflight$
 DECLARE
-    matching_migrations INTEGER;
-    recorded_migrations INTEGER;
+    lineage_is_canonical BOOLEAN;
 BEGIN
     IF TO_REGCLASS('flyway_schema_history') IS NULL THEN
         RAISE EXCEPTION
             'V7 preflight requires a canonical Flyway V6 database; schema history is missing';
     END IF;
 
-    WITH expected(version, script, checksum) AS (
+    WITH expected(version, type, script, checksum, success) AS (
         VALUES
-            ('1', 'V1__create_transactions.sql', -1701863425),
-            ('2', 'V2__create_outbox_events.sql', 98626752),
-            ('3', 'V3__harden_transaction_invariants.sql', -915971206),
-            ('4', 'V4__add_outbox_claim_leases.sql', 1046310496),
-            ('5', 'V5__optimize_outbox_claim_indexes.sql', -1676750279),
-            ('6', 'V6__recover_terminal_outbox_events.sql', 1886286009)
+            ('1', 'SQL', 'V1__create_transactions.sql', -1701863425, TRUE),
+            ('2', 'SQL', 'V2__create_outbox_events.sql', 98626752, TRUE),
+            ('3', 'SQL', 'V3__harden_transaction_invariants.sql', -915971206, TRUE),
+            ('4', 'SQL', 'V4__add_outbox_claim_leases.sql', 1046310496, TRUE),
+            ('5', 'SQL', 'V5__optimize_outbox_claim_indexes.sql', -1676750279, TRUE),
+            ('6', 'SQL', 'V6__recover_terminal_outbox_events.sql', 1886286009, TRUE)
+    ), actual(version, type, script, checksum, success) AS (
+        SELECT version, type, script, checksum, success
+        FROM flyway_schema_history
+    ), missing AS (
+        SELECT version, type, script, checksum, success FROM expected
+        EXCEPT ALL
+        SELECT version, type, script, checksum, success FROM actual
+    ), unexpected AS (
+        SELECT version, type, script, checksum, success FROM actual
+        EXCEPT ALL
+        SELECT version, type, script, checksum, success FROM expected
     )
-    SELECT COUNT(*)
-    INTO matching_migrations
-    FROM expected
-    JOIN flyway_schema_history AS actual
-      ON actual.version = expected.version
-     AND actual.type = 'SQL'
-     AND actual.script = expected.script
-     AND actual.checksum = expected.checksum
-     AND actual.success;
+    SELECT NOT EXISTS (SELECT 1 FROM missing)
+       AND NOT EXISTS (SELECT 1 FROM unexpected)
+    INTO lineage_is_canonical;
 
-    SELECT COUNT(*)
-    INTO recorded_migrations
-    FROM flyway_schema_history
-    WHERE version IS NOT NULL;
-
-    IF matching_migrations <> 6 OR recorded_migrations <> 6 THEN
+    IF NOT lineage_is_canonical THEN
         RAISE EXCEPTION
             'V7 preflight requires the exact canonical Flyway V1-V6 state; found a missing, changed, failed, extra, or already-applied migration'
             USING HINT =

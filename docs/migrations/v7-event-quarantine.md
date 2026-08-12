@@ -32,11 +32,13 @@ forward migration. Do not delete, merge, or silently select historical records.
    ```
 
 4. Retain the event-level worklist as deployment evidence. The command returns
-   zero only when `flyway_schema_history` contains exactly the canonical V1-V6
-   filenames and checksums and the reported
-   `unresolved_historical_unpublished_events` count is zero. Missing, changed,
-   failed, extra, or already-applied migrations and every nonzero event count
-   make the process exit nonzero.
+   zero only when `flyway_schema_history` is an exact multiset match for the
+   six expected V1-V6 `version`/`type`/`script`/`checksum`/`success` tuples and
+   the reported `unresolved_historical_unpublished_events` count is zero.
+   A changed checksum, missing or duplicate migration, failed migration,
+   version-null repeatable migration, extra versioned migration,
+   already-applied V7 migration, or every nonzero event count makes the process
+   exit nonzero.
 
 If the count is nonzero, either drain the rows with the compatible pre-V2
 publisher before upgrading, or delay release until UC-P08 provides a reviewed
@@ -53,9 +55,10 @@ This service runs Flyway synchronously at startup. The procedure requires
 stopped writers and pollers; it is not a rolling or zero-downtime plan.
 
 `V7PreflightIT` copies and executes this exact SQL file inside PostgreSQL 17. It
-asserts success for an empty canonical V6 database, failure for a changed
-recorded checksum, failure for one unresolved historical event, and failure
-after V7 has been applied.
+asserts success for an empty canonical V6 database and failure for a changed
+recorded checksum, a deliberately replaced V2 row plus duplicate V1 and
+version-null repeatable rows, one unresolved historical event, and an
+already-applied V7 migration.
 
 ## Migration behavior
 

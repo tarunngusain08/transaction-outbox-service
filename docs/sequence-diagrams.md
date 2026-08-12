@@ -1,11 +1,133 @@
 # Sequence-diagram catalog
 
-These diagrams describe observable ordering and state transitions. Sections
+These diagrams describe observable ordering and state transitions. They are the
+canonical home for repository visuals: the README contains only its compact
+reviewer overview, while this catalog retains every detailed diagram. Sections
 labelled **implemented** correspond to executable repository behavior. Sections
-labelled **planned** are next-phase designs and are not available today.
+labelled **planned / not implemented** are future designs, not available today.
 
 The use-case IDs and actor definitions are maintained in
 [the use-case model](use-cases.md).
+
+## Scope maps
+
+### Implemented use cases
+
+```mermaid
+flowchart LR
+    apiClient["Actor: API client"]
+    scheduler["Actor: Spring scheduler"]
+    operator["Actor: Operator / health probe"]
+    deployment["Actor: Deployment operator"]
+    migration["Actor: Flyway migration runner"]
+    kafkaBroker["Actor: Kafka broker"]
+    kafkaConsumer["Actor: Kafka consumer"]
+
+    subgraph service["Transaction Outbox Service — implemented"]
+        uc01(["UC-01 Create canonical transaction"])
+        uc02(["UC-02 Retrieve transaction by ID"])
+        uc03(["UC-03 Normalize legacy transaction"])
+        uc04(["UC-04 Claim and publish a due outbox event"])
+        uc05(["UC-05 Retry delivery until published"])
+        uc06(["UC-06 Publish transaction-created contract"])
+        uc07(["UC-07 Report application and outbox status"])
+        uc08(["UC-08 Inspect retained operational history"])
+        uc09(["UC-09 Reject retired API V1 explicitly"])
+        uc10(["UC-10 Gate and quarantine pre-V2 events"])
+    end
+
+    apiClient --> uc01
+    apiClient --> uc02
+    apiClient --> uc03
+    apiClient --> uc09
+    deployment --> uc10
+    migration --> uc10
+    scheduler --> uc04
+    uc01 -->|"atomically creates PENDING event"| uc04
+    uc04 -->|"delivery error"| uc05
+    uc05 -->|"due retry"| uc04
+    uc04 -->|"acknowledged payload"| uc06
+    uc06 --> kafkaBroker
+    kafkaConsumer -->|"consumes and deduplicates by eventId"| kafkaBroker
+    operator --> uc07
+    operator --> uc08
+    uc10 -->|"reported separately"| uc07
+    uc10 -->|"preserved evidence"| uc08
+
+    classDef implemented fill:#e8f5e9,stroke:#2e7d32,color:#1b5e20;
+    class uc01,uc02,uc03,uc04,uc05,uc06,uc07,uc08,uc09,uc10 implemented;
+```
+
+### Planned / not implemented use cases
+
+```mermaid
+flowchart LR
+    apiClient["Actor: API client"]
+    identity["Actor: Identity provider / security admin"]
+    operator["Actor: Authorized operator"]
+    retention["Actor: Retention scheduler"]
+    platform["Actor: Platform / SRE"]
+    deliveryTeam["Actor: Developer / CI"]
+    schemaRegistry["Actor: Schema registry"]
+
+    subgraph planned["Transaction Outbox Service — planned next phases"]
+        p01(["UC-P01 Authenticate and authorize requests"])
+        p02(["UC-P02 Enforce request rate limits"])
+        p03(["UC-P03 Protect account identifiers and logs"])
+        p04(["UC-P04 Expedite a persistent delivery retry"])
+        p05(["UC-P05 Archive eligible PUBLISHED events"])
+        p06(["UC-P06 Export telemetry and alert on SLOs"])
+        p07(["UC-P07 Enforce event-schema compatibility"])
+        p08(["UC-P08 Review and replay quarantined payload"])
+    end
+
+    apiClient --> p01
+    identity --> p01
+    apiClient --> p02
+    p01 -->|"allowed request"| p03
+    operator --> p04
+    retention --> p05
+    platform --> p06
+    deliveryTeam --> p07
+    p07 --> schemaRegistry
+    operator --> p08
+
+    classDef planned fill:#fff8e1,stroke:#f9a825,color:#5d4037,stroke-dasharray:5 5;
+    class p01,p02,p03,p04,p05,p06,p07,p08 planned;
+```
+
+### Implemented engineering workflows
+
+```mermaid
+flowchart LR
+    developer["Actor: Developer"]
+    ci["Actor: GitHub Actions"]
+
+    subgraph engineering["Repository engineering workflows — implemented"]
+        eng01(["ENG-01 Build JAR and image"])
+        eng02(["ENG-02 Run / stop local stack"])
+        eng03(["ENG-03 Run unit, integration, lint, coverage"])
+        eng04(["ENG-04 Run mixed smoke traffic"])
+        eng05(["ENG-05 Run concurrent load traffic"])
+        eng06(["ENG-06 Execute CI quality gates"])
+        eng07(["ENG-07 Run migration release gates"])
+    end
+
+    developer --> eng01
+    developer --> eng02
+    developer --> eng03
+    developer --> eng04
+    developer --> eng05
+    developer --> eng07
+    ci --> eng06
+    eng06 --> eng01
+    eng06 --> eng03
+    eng06 --> eng04
+    eng06 --> eng05
+
+    classDef implemented fill:#e8f5e9,stroke:#2e7d32,color:#1b5e20;
+    class eng01,eng02,eng03,eng04,eng05,eng06,eng07 implemented;
+```
 
 ## Implemented runtime sequences
 
@@ -264,11 +386,11 @@ sequenceDiagram
     Operator->>Writers: Stop every writer and poller
     Operator->>DB: Take restorable snapshot and capture Flyway history
     Operator->>Make: Run read-only repeatable-read preflight
-    Make->>DB: Match exact canonical V1-V6 scripts and checksums
-    alt Lineage is missing, changed, extra, or already at V7
+    Make->>DB: Check six expected V1-V6 tuple matches and versioned-row count
+    alt Recorded-history condition fails or database is already at V7
         DB-->>Make: Reject migration state
         Make-->>Operator: Exit nonzero without approving release
-    else Lineage is exact canonical V6
+    else Recorded-history condition is accepted
         Make->>DB: Count and inventory PENDING / PROCESSING / FAILED
         DB-->>Operator: Worklist plus unresolved historical count
         alt Count is zero
@@ -297,7 +419,7 @@ sequenceDiagram
         Publisher->>DB: Claim only due PENDING or expired PROCESSING
         DB-->>Publisher: New V2 event or empty, never QUARANTINED
         Publisher->>Kafka: Publish only when a claimable V2 event exists
-        Note over DB,Kafka: Numeric schemaVersion 2 is only a discriminator, and consumers validate the full envelope
+        Note over DB,Kafka: Numeric schemaVersion 2 is only a discriminator, and the preflight is a narrow recorded-history gate
     end
 ```
 

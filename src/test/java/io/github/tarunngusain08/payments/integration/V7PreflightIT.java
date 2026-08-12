@@ -54,6 +54,13 @@ class V7PreflightIT {
                 .contains("V7 preflight requires the exact canonical Flyway V1-V6 state");
         setFlywayChecksum("3", -915971206);
 
+        replaceV2WithDuplicateV1AndRepeatableHistory();
+        var nonCanonicalHistoryResult = runPreflight();
+        assertThat(nonCanonicalHistoryResult.getExitCode()).isNotZero();
+        assertThat(output(nonCanonicalHistoryResult))
+                .contains("V7 preflight requires the exact canonical Flyway V1-V6 state");
+        restoreCanonicalV2History();
+
         insertUnresolvedHistoricalEvent();
 
         var unresolvedResult = runPreflight();
@@ -133,6 +140,41 @@ class V7PreflightIT {
             statement.setInt(1, checksum);
             statement.setString(2, version);
             assertThat(statement.executeUpdate()).isOne();
+        }
+    }
+
+    private void replaceV2WithDuplicateV1AndRepeatableHistory() throws Exception {
+        try (var connection = DriverManager.getConnection(
+                POSTGRES.getJdbcUrl(), POSTGRES.getUsername(), POSTGRES.getPassword()
+        ); var statement = connection.createStatement()) {
+            assertThat(statement.executeUpdate("DELETE FROM flyway_schema_history WHERE version = '2'"))
+                    .isOne();
+            assertThat(statement.executeUpdate("""
+                    INSERT INTO flyway_schema_history (
+                        installed_rank, version, description, type, script, checksum,
+                        installed_by, execution_time, success
+                    ) VALUES
+                        (7, '1', 'duplicate V1', 'SQL', 'V1__create_transactions.sql', -1701863425, 'test', 0, TRUE),
+                        (8, NULL, 'repeatable history', 'SQL', 'R__legacy_history.sql', NULL, 'test', 0, TRUE)
+                    """))
+                    .isEqualTo(2);
+        }
+    }
+
+    private void restoreCanonicalV2History() throws Exception {
+        try (var connection = DriverManager.getConnection(
+                POSTGRES.getJdbcUrl(), POSTGRES.getUsername(), POSTGRES.getPassword()
+        ); var statement = connection.createStatement()) {
+            assertThat(statement.executeUpdate("DELETE FROM flyway_schema_history WHERE installed_rank IN (7, 8)"))
+                    .isEqualTo(2);
+            assertThat(statement.executeUpdate("""
+                    INSERT INTO flyway_schema_history (
+                        installed_rank, version, description, type, script, checksum,
+                        installed_by, execution_time, success
+                    ) VALUES (2, '2', 'create outbox events', 'SQL',
+                              'V2__create_outbox_events.sql', 98626752, 'test', 0, TRUE)
+                    """))
+                    .isOne();
         }
     }
 
