@@ -19,7 +19,7 @@
 
     <properties>
         <java.version>21</java.version>
-        <checkstyle.version>13.9.0</checkstyle.version>
+        <checkstyle.version>13.10.0</checkstyle.version>
         <jacoco.version>0.8.15</jacoco.version>
         <maven-checkstyle-plugin.version>3.6.0</maven-checkstyle-plugin.version>
         <maven-enforcer-plugin.version>3.6.3</maven-enforcer-plugin.version>
