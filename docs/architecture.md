@@ -47,6 +47,19 @@ the create endpoint. It:
 - flattens payer/payee accounts; and
 - preserves source-only fields in `metadata`.
 
+## Verification strategy
+
+Fast unit tests isolate normalization, transaction creation, and outbox retry
+logic. A separate Testcontainers suite exercises the HTTP boundary, Flyway
+migrations, PostgreSQL constraints and persistence, scheduled outbox delivery,
+and Kafka consumption together.
+
+The repository-level traffic simulator covers the packaged Compose topology. It
+sends expected successes and failures under sequential or concurrent load, then
+correlates its unique run prefix across `transactions`, published
+`outbox_events`, and consumed Kafka messages. This verifies the complete data
+path without treating expected 4xx responses as test failures.
+
 ## Production follow-ups
 
 - Partition or archive old `PUBLISHED` rows according to audit-retention policy.
@@ -54,4 +67,4 @@ the create endpoint. It:
 - Encrypt or tokenize account identifiers and apply field-level log redaction.
 - Add authentication, authorization, rate limiting, and request tracing.
 - Add schema-registry compatibility checks for Kafka events.
-- Add Testcontainers integration tests and broker/database telemetry.
+- Add broker/database telemetry and production SLO dashboards.

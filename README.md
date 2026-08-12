@@ -32,28 +32,38 @@ called out as a production follow-up in [the architecture notes](docs/architectu
 
 ## Run locally
 
-Prerequisites: Java 21+ and Docker with Compose.
+Prerequisites: Java 21+, Docker with Compose, GNU Make, and Python 3.
 
 ```bash
-docker compose up -d
-docker compose exec kafka /opt/kafka/bin/kafka-topics.sh \
-  --bootstrap-server localhost:9092 \
-  --create --if-not-exists \
-  --topic payments.transactions.created \
-  --partitions 3 \
-  --replication-factor 1
-./mvnw spring-boot:run
+make run
 ```
 
-The service starts at `http://localhost:8080`. Flyway creates both tables on
-startup. Check readiness with:
+This one command builds the application image, starts PostgreSQL and Kafka,
+creates the Kafka topic, starts the service, and waits for every health check.
+The service is then available at `http://localhost:8080`. Flyway creates both
+tables on startup. Check readiness with:
 
 ```bash
 curl http://localhost:8080/actuator/health
 ```
 
-Stop the dependencies with `docker compose down`. Add `-v` only when you also
-want to remove the local PostgreSQL volume.
+Stop the stack with `make stop`. PostgreSQL data is retained between runs.
+
+### Make targets
+
+| Command | Purpose |
+|---|---|
+| `make build` | Build the executable JAR and local container image |
+| `make run` | Build and start the complete healthy local stack |
+| `make stop` | Stop the stack while retaining database data |
+| `make unit-test` | Run the fast unit suite only |
+| `make integration-test` | Run real PostgreSQL/Kafka Testcontainers tests only |
+| `make test` | Run all unit and integration tests |
+| `make coverage` | Run all tests and enforce at least 70% line coverage |
+| `make lint` | Run Checkstyle and compile-check the traffic simulator |
+| `make traffic` | Start the stack and run the mixed end-to-end smoke scenario |
+| `make load-test` | Start the stack and run configurable concurrent traffic |
+| `make check` | Run lint, all tests, coverage enforcement, and the build |
 
 ## API
 
@@ -106,7 +116,7 @@ Consume created events:
 
 ```bash
 docker compose exec kafka /opt/kafka/bin/kafka-console-consumer.sh \
-  --bootstrap-server localhost:9092 \
+  --bootstrap-server kafka:29092 \
   --topic payments.transactions.created \
   --from-beginning
 ```
@@ -121,13 +131,52 @@ docker compose exec postgres psql -U payments -d payments -c \
 ## Build and test
 
 ```bash
-./mvnw clean verify
+make test
 ```
 
 The unit suite covers exact amount/date/type normalization, atomic-write service
 logic, duplicate detection, outbox state transitions, Kafka acknowledgement, and
-retry scheduling. CI runs the same command on every pull request and push to
-`main`.
+retry scheduling. The integration suite boots the real HTTP application against
+ephemeral PostgreSQL and Kafka containers, then verifies persistence, duplicate
+and validation failures, normalization, outbox publication, and the consumed
+Kafka event. The JaCoCo HTML report is written to `target/site/jacoco/index.html`.
+
+### End-to-end traffic and load
+
+Run a deterministic mixed scenario:
+
+```bash
+make traffic
+```
+
+It sends successful creates and normalization requests together with deliberate
+duplicate, validation, and normalization failures. It then queries PostgreSQL,
+waits for every matching outbox row to become `PUBLISHED`, consumes Kafka from
+the beginning, and fails unless every expected transaction event is present.
+
+Run a larger concurrent scenario by overriding the defaults:
+
+```bash
+make load-test LOAD_REQUESTS=250 LOAD_CONCURRENCY=20
+make stop
+```
+
+The load report includes the status distribution, throughput, and p50/p95/p99
+HTTP latency. Each invocation uses a unique reference prefix, so retained local
+data does not interfere with later runs.
+
+## Continuous integration
+
+The GitHub Actions workflow defines independent checks for:
+
+- Java/Python lint and Docker Compose validation;
+- unit tests;
+- Testcontainers PostgreSQL/Kafka integration tests;
+- JaCoCo coverage enforcement and uploaded test reports;
+- executable JAR and container-image builds; and
+- mixed end-to-end traffic plus a bounded concurrent load scenario.
+
+The checks run for pull requests and pushes targeting `main`.
 
 ## Configuration
 

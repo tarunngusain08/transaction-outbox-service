@@ -25,3 +25,7 @@ target/
 ### Local environment ###
 .env
 *.log
+
+### Python ###
+__pycache__/
+*.py[cod]
