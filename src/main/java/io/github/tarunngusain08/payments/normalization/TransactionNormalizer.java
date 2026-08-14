@@ -1,26 +1,19 @@
 package io.github.tarunngusain08.payments.normalization;
 
-import io.github.tarunngusain08.payments.normalization.api.LegacyTransactionRequest;
-import io.github.tarunngusain08.payments.transaction.InvalidTransactionException;
-import io.github.tarunngusain08.payments.transaction.PaymentChannel;
-import io.github.tarunngusain08.payments.transaction.TransactionContract;
-import io.github.tarunngusain08.payments.transaction.TransactionType;
+import io.github.tarunngusain08.payments.transaction.domain.PaymentChannel;
+import io.github.tarunngusain08.payments.transaction.domain.TransactionType;
 import io.github.tarunngusain08.payments.transaction.api.CreateTransactionRequest;
-import io.github.tarunngusain08.payments.validation.CurrencySupport;
-import io.github.tarunngusain08.payments.validation.MetadataCanonicalizer;
-import jakarta.validation.Validator;
 import org.springframework.stereotype.Service;
 
 import java.math.BigDecimal;
 import java.math.RoundingMode;
-import java.time.Clock;
 import java.time.DateTimeException;
 import java.time.Instant;
 import java.time.LocalDateTime;
 import java.time.ZoneId;
 import java.time.format.DateTimeFormatter;
 import java.time.format.ResolverStyle;
-import java.util.Comparator;
+import java.util.Currency;
 import java.util.LinkedHashMap;
 import java.util.Locale;
 import java.util.Map;
@@ -33,35 +26,13 @@ public class TransactionNormalizer {
     static final DateTimeFormatter SOURCE_DATE_FORMAT = DateTimeFormatter
             .ofPattern("dd-MM-uuuu HH:mm:ss", Locale.ROOT)
             .withResolverStyle(ResolverStyle.STRICT);
-    private static final Pattern ORDINARY_DECIMAL =
-            Pattern.compile("^[0-9]+(?:\\.[0-9]+)?$");
-    private final MetadataCanonicalizer metadataCanonicalizer;
-    private final Validator validator;
-    private final Clock clock;
-
-    public TransactionNormalizer(
-            MetadataCanonicalizer metadataCanonicalizer,
-            Validator validator,
-            Clock clock
-    ) {
-        this.metadataCanonicalizer = metadataCanonicalizer;
-        this.validator = validator;
-        this.clock = clock;
-    }
+    private static final Pattern DECIMAL_AMOUNT = Pattern.compile("^[0-9]+(?:\\.[0-9]+)?$");
 
     public CreateTransactionRequest normalize(LegacyTransactionRequest source) {
-        String currency = canonicalCurrency(source.currency());
-        var channel = toChannel(source.mode());
-        var createdAt = toInstant(source.transactionDate());
-        Map<String, Object> metadata;
-        try {
-            metadata = metadataCanonicalizer.canonicalize(metadata(source, channel));
-        } catch (InvalidTransactionException exception) {
-            throw new NormalizationException(exception.getMessage(), exception);
-        }
+        String currency = source.currency().trim().toUpperCase(Locale.ROOT);
+        PaymentChannel channel = toChannel(source.mode());
 
-        var normalized = new CreateTransactionRequest(
-                TransactionContract.LEGACY_BANK_FEED_SOURCE,
+        return new CreateTransactionRequest(
                 source.transactionReference().trim(),
                 toMinorUnits(source.transactionAmount(), currency),
                 currency,
@@ -69,35 +40,42 @@ public class TransactionNormalizer {
                 source.payer().accountNumber().trim(),
                 source.payee().accountNumber().trim(),
                 channel,
-                createdAt,
-                metadata
+                toInstant(source.transactionDate()),
+                metadata(source, channel)
         );
-        validateCanonicalOutput(normalized);
-        return normalized;
     }
 
     long toMinorUnits(String rawAmount, String currencyCode) {
-        String currency = canonicalCurrency(currencyCode);
-        if (rawAmount == null || !ORDINARY_DECIMAL.matcher(rawAmount).matches()) {
-            throw new NormalizationException(
-                    "txn_amount must be a positive plain-decimal INR amount"
-            );
+        Currency currency;
+        try {
+            currency = Currency.getInstance(currencyCode);
+        } catch (IllegalArgumentException exception) {
+            throw new NormalizationException("Unsupported ccy: " + currencyCode, exception);
+        }
+
+        String amountText = rawAmount.trim();
+        if (!DECIMAL_AMOUNT.matcher(amountText).matches()) {
+            throw new NormalizationException("txn_amount must use ordinary decimal notation");
         }
 
         try {
-            var amount = new BigDecimal(rawAmount);
+            int fractionDigits = currency.getDefaultFractionDigits();
+            if (fractionDigits < 0) {
+                throw new NormalizationException("Currency does not define minor units: " + currencyCode);
+            }
+
+            var amount = new BigDecimal(amountText);
             if (amount.signum() <= 0) {
                 throw new NormalizationException("txn_amount must be greater than zero");
             }
 
             return amount
-                    .setScale(TransactionContract.INR_MINOR_UNIT_EXPONENT, RoundingMode.UNNECESSARY)
-                    .movePointRight(TransactionContract.INR_MINOR_UNIT_EXPONENT)
+                    .setScale(fractionDigits, RoundingMode.UNNECESSARY)
+                    .movePointRight(fractionDigits)
                     .longValueExact();
         } catch (NumberFormatException | ArithmeticException exception) {
             throw new NormalizationException(
-                    "txn_amount must be an exact %s amount with no fractional paise"
-                            .formatted(currency),
+                    "txn_amount must have no fractional minor units for " + currencyCode,
                     exception
             );
         }
@@ -128,8 +106,7 @@ public class TransactionNormalizer {
         try {
             return LocalDateTime.parse(rawDate.trim(), SOURCE_DATE_FORMAT)
                     .atZone(SOURCE_TIME_ZONE)
-                    .toInstant()
-                    .truncatedTo(java.time.temporal.ChronoUnit.MICROS);
+                    .toInstant();
         } catch (DateTimeException exception) {
             throw new NormalizationException(
                     "txn_date must use dd-MM-yyyy HH:mm:ss and represent a valid date",
@@ -154,33 +131,5 @@ public class TransactionNormalizer {
             metadata.put("originalMode", source.mode().trim());
         }
         return Map.copyOf(metadata);
-    }
-
-    private String canonicalCurrency(String rawCurrency) {
-        try {
-            return CurrencySupport.canonicalizeLegacy(rawCurrency);
-        } catch (IllegalArgumentException exception) {
-            throw new NormalizationException("Unsupported ccy: " + rawCurrency, exception);
-        }
-    }
-
-    private void validateCanonicalOutput(CreateTransactionRequest normalized) {
-        validator.validate(normalized).stream()
-                .min(Comparator.comparing(violation -> violation.getPropertyPath().toString()))
-                .ifPresent(violation -> {
-                    throw new NormalizationException(
-                            "normalized " + violation.getPropertyPath() + " "
-                                    + violation.getMessage()
-                    );
-                });
-
-        try {
-            TransactionContract.validateCreatedAt(
-                    normalized.createdAt(),
-                    TransactionContract.canonicalTimestamp(Instant.now(clock))
-            );
-        } catch (InvalidTransactionException exception) {
-            throw new NormalizationException(exception.getMessage(), exception);
-        }
     }
 }

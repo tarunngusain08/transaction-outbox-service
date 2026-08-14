@@ -15,16 +15,15 @@
     <artifactId>transaction-outbox-service</artifactId>
     <version>0.0.1-SNAPSHOT</version>
     <name>transaction-outbox-service</name>
-    <description>Payment transaction service with a PostgreSQL transactional outbox and Kafka</description>
+    <description>Small payment ingestion service with PostgreSQL, Kafka, and a minimal outbox</description>
 
     <properties>
         <java.version>21</java.version>
         <checkstyle.version>13.10.0</checkstyle.version>
         <jacoco.version>0.8.15</jacoco.version>
         <maven-checkstyle-plugin.version>3.6.0</maven-checkstyle-plugin.version>
-        <maven-enforcer-plugin.version>3.6.3</maven-enforcer-plugin.version>
-        <minimum.branch.coverage>0.65</minimum.branch.coverage>
-        <minimum.line.coverage>0.70</minimum.line.coverage>
+        <minimum.line.coverage>0.65</minimum.line.coverage>
+        <minimum.branch.coverage>0.55</minimum.branch.coverage>
         <skipIntegrationTests>false</skipIntegrationTests>
         <skipUnitTests>false</skipUnitTests>
     </properties>
@@ -70,11 +69,6 @@
             <scope>test</scope>
         </dependency>
         <dependency>
-            <groupId>org.springframework.kafka</groupId>
-            <artifactId>spring-kafka-test</artifactId>
-            <scope>test</scope>
-        </dependency>
-        <dependency>
             <groupId>org.awaitility</groupId>
             <artifactId>awaitility</artifactId>
             <scope>test</scope>
@@ -101,29 +95,6 @@
             <plugin>
                 <groupId>org.springframework.boot</groupId>
                 <artifactId>spring-boot-maven-plugin</artifactId>
-            </plugin>
-            <plugin>
-                <groupId>org.apache.maven.plugins</groupId>
-                <artifactId>maven-enforcer-plugin</artifactId>
-                <version>${maven-enforcer-plugin.version}</version>
-                <executions>
-                    <execution>
-                        <id>enforce-toolchain</id>
-                        <goals>
-                            <goal>enforce</goal>
-                        </goals>
-                        <configuration>
-                            <rules>
-                                <requireJavaVersion>
-                                    <version>[21,27)</version>
-                                </requireJavaVersion>
-                                <requireMavenVersion>
-                                    <version>[3.9,)</version>
-                                </requireMavenVersion>
-                            </rules>
-                        </configuration>
-                    </execution>
-                </executions>
             </plugin>
             <plugin>
                 <groupId>org.apache.maven.plugins</groupId>

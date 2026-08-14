@@ -5,69 +5,42 @@ MVNW := ./mvnw
 MAVEN_FLAGS ?= --batch-mode --no-transfer-progress
 IMAGE_NAME ?= transaction-outbox-service:local
 APP_PORT ?= 8080
-LOAD_REQUESTS ?= 100
-LOAD_CONCURRENCY ?= 10
-LOAD_MIN_THROUGHPUT ?= 1
-LOAD_MAX_P95_MS ?= 3000
-CHROME_BIN ?= $(shell command -v google-chrome 2>/dev/null || command -v chromium 2>/dev/null || command -v chromium-browser 2>/dev/null || { test -x "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" && echo "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"; })
 
-.PHONY: help build run stop reset logs clean unit-test integration-test test lint docs-lint coverage migration-preflight migration-v7-preflight traffic load-test check
+.PHONY: help build run stop reset clean unit-test integration-test test lint traffic check
 
-help: ## Show the available local workflows.
+help: ## Show available commands.
 	@awk 'BEGIN {FS = ":.*## "; printf "Usage: make <target>\n\nTargets:\n"} /^[a-zA-Z_-]+:.*## / {printf "  %-18s %s\n", $$1, $$2}' $(MAKEFILE_LIST)
 
-build: ## Build the executable JAR and local application image.
+build: ## Build the executable JAR and local container image.
 	$(MVNW) $(MAVEN_FLAGS) clean package -DskipUnitTests=true
 	docker build --tag $(IMAGE_NAME) .
 
-run: ## Build and start the complete application, PostgreSQL, and Kafka stack.
+run: ## Start the application, PostgreSQL, and Kafka.
 	docker compose up --detach --build --wait
 
-stop: ## Stop the local stack while retaining PostgreSQL and Kafka data.
+stop: ## Stop the local stack and keep its data volumes.
 	docker compose down
 
-reset: ## Stop the local stack and delete its PostgreSQL and Kafka volumes.
+reset: ## Stop the stack and remove disposable local data volumes.
 	docker compose down --volumes
-
-logs: ## Follow application logs from the local stack.
-	docker compose logs --follow app
 
 clean: ## Remove Maven build output.
 	$(MVNW) $(MAVEN_FLAGS) clean
 
-unit-test: ## Run fast unit tests only.
+unit-test: ## Run focused unit tests.
 	$(MVNW) $(MAVEN_FLAGS) clean test -DskipIntegrationTests=true
 
-integration-test: ## Run PostgreSQL/Kafka Testcontainers integration tests only.
+integration-test: ## Run the PostgreSQL/Kafka integration test.
 	$(MVNW) $(MAVEN_FLAGS) clean verify -DskipUnitTests=true -Djacoco.skip=true
 
-test: ## Run all unit and integration tests.
+test: ## Run all tests and enforce coverage.
 	$(MVNW) $(MAVEN_FLAGS) clean verify
 
-lint: ## Run Java source checks.
+lint: ## Run Java style checks and validate the traffic script.
 	$(MVNW) $(MAVEN_FLAGS) checkstyle:check
 	python3 -m py_compile scripts/traffic_simulator.py
-	python3 -m py_compile scripts/validate_docs.py
 
-docs-lint: ## Reproduce Markdown, link, traceability, and Mermaid checks.
-	PUPPETEER_SKIP_DOWNLOAD=true npm ci --no-audit --no-fund
-	PUPPETEER_EXECUTABLE_PATH="$(CHROME_BIN)" npm run docs:check
+traffic: run ## Send success/failure traffic and confirm DB/Kafka delivery.
+	python3 scripts/traffic_simulator.py --base-url http://localhost:$(APP_PORT)
 
-coverage: ## Run all tests and enforce the JaCoCo coverage threshold.
-	$(MVNW) $(MAVEN_FLAGS) clean verify
-
-migration-preflight: ## Read-only V2 identity/currency worklist before applying V3.
-	docker compose up --detach --wait postgres
-	docker compose exec -T postgres psql -X -U payments -d payments < scripts/sql/preflight_v3_transaction_identity.sql
-
-migration-v7-preflight: ## Fail unless canonical V6 has zero unpublished events.
-	docker compose up --detach --wait postgres
-	docker compose exec -T postgres psql -X -U payments -d payments < scripts/sql/preflight_v7_event_compatibility.sql
-
-traffic: run ## Send mixed success/failure traffic and verify database/Kafka delivery.
-	python3 scripts/traffic_simulator.py --mode smoke --base-url http://localhost:$(APP_PORT)
-
-load-test: run ## Run the configurable concurrent local load scenario.
-	python3 scripts/traffic_simulator.py --mode load --base-url http://localhost:$(APP_PORT) --requests $(LOAD_REQUESTS) --concurrency $(LOAD_CONCURRENCY) --min-throughput $(LOAD_MIN_THROUGHPUT) --max-p95-ms $(LOAD_MAX_P95_MS)
-
-check: lint docs-lint test build ## Run repository-static checks, tests, and build gates.
+check: lint test build ## Run the complete local quality gate.

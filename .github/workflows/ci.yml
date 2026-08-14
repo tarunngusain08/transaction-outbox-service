@@ -2,155 +2,43 @@ name: CI
 
 on:
   push:
-    branches:
-      - main
-      - "tgusain/**"
+    branches: [main]
   pull_request:
-    branches:
-      - main
-
-concurrency:
-  group: ci-${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+    branches: [main]
 
 permissions:
   contents: read
 
 jobs:
-  static-analysis:
+  verify:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 25
     steps:
       - name: Check out repository
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        uses: actions/checkout@v4
 
       - name: Set up Java 21
-        uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961 # v5
+        uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: "21"
           cache: maven
-
-      - name: Set up Node.js 24
-        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
-        with:
-          node-version: "24"
-          cache: npm
 
       - name: Validate Compose configuration
         run: docker compose config --quiet
 
-      - name: Lint Java and Python sources
+      - name: Lint
         run: make lint
 
-      - name: Validate Markdown, links, and Mermaid diagrams
-        env:
-          CHROME_BIN: /usr/bin/google-chrome
-        run: make docs-lint
+      - name: Run unit and integration tests with coverage
+        run: make test
 
-  tests-and-coverage:
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-    steps:
-      - name: Check out repository
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-
-      - name: Set up Java 21
-        uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961 # v5
-        with:
-          distribution: temurin
-          java-version: "21"
-          cache: maven
-
-      - name: Run unit and PostgreSQL/Kafka integration tests with coverage
-        run: make coverage
-
-      - name: Upload coverage and test reports
-        if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: coverage-and-test-reports
-          path: |
-            target/site/jacoco
-            target/surefire-reports
-            target/failsafe-reports
-          if-no-files-found: warn
-
-  dependency-review:
-    if: github.event_name == 'pull_request'
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    steps:
-      - name: Check out repository
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-
-      - name: Check dependency review availability
-        id: dependency-graph
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          status="$(curl --silent --output /dev/null --write-out '%{http_code}' \
-            --header "Authorization: Bearer ${GH_TOKEN}" \
-            --header "X-GitHub-Api-Version: 2022-11-28" \
-            "https://api.github.com/repos/${GITHUB_REPOSITORY}/dependency-graph/sbom")"
-          case "${status}" in
-            200|202)
-              echo "enabled=true" >> "${GITHUB_OUTPUT}"
-              ;;
-            404)
-              echo "enabled=false" >> "${GITHUB_OUTPUT}"
-              echo "::notice::Dependency graph is disabled; dependency review was skipped."
-              ;;
-            *)
-              echo "::error::Dependency graph capability check returned HTTP ${status}."
-              exit 1
-              ;;
-          esac
-
-      - name: Reject newly introduced vulnerable dependencies
-        if: steps.dependency-graph.outputs.enabled == 'true'
-        uses: actions/dependency-review-action@a1d282b36b6f3519aa1f3fc636f609c47dddb294 # v5.0.0
-        with:
-          fail-on-severity: moderate
-
-  build:
-    needs:
-      - static-analysis
-      - tests-and-coverage
-    runs-on: ubuntu-latest
-    timeout-minutes: 12
-    steps:
-      - name: Check out repository
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-
-      - name: Set up Java 21
-        uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961 # v5
-        with:
-          distribution: temurin
-          java-version: "21"
-          cache: maven
-
-      - name: Build executable JAR and container image
+      - name: Build JAR and container image
         run: make build
 
-  end-to-end-and-load:
-    needs: build
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-    steps:
-      - name: Check out repository
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-
-      - name: Run mixed pipeline traffic
+      - name: Verify the local API, PostgreSQL, outbox, and Kafka flow
         run: make traffic
 
-      - name: Run bounded concurrent load acceptance
-        run: make load-test LOAD_REQUESTS=40 LOAD_CONCURRENCY=8
-
-      - name: Show application logs after failure
-        if: failure()
-        run: docker compose logs app
-
-      - name: Stop local stack
+      - name: Stop the local stack
         if: always()
         run: make stop

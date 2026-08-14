@@ -1,22 +1,18 @@
 package io.github.tarunngusain08.payments.transaction.api;
 
+import io.github.tarunngusain08.payments.normalization.LegacyTransactionRequest;
 import io.github.tarunngusain08.payments.normalization.TransactionNormalizer;
-import io.github.tarunngusain08.payments.normalization.api.LegacyTransactionRequest;
-import io.github.tarunngusain08.payments.transaction.TransactionService;
+import io.github.tarunngusain08.payments.transaction.application.TransactionService;
 import jakarta.validation.Valid;
-import org.springframework.http.ResponseEntity;
-import org.springframework.web.bind.annotation.GetMapping;
-import org.springframework.web.bind.annotation.PathVariable;
+import org.springframework.http.HttpStatus;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.ResponseStatus;
 import org.springframework.web.bind.annotation.RestController;
 
-import java.net.URI;
-import java.util.UUID;
-
 @RestController
-@RequestMapping("/api/v2/transactions")
+@RequestMapping("/api/v1/transactions")
 public class TransactionController {
 
     private final TransactionService transactionService;
@@ -31,26 +27,13 @@ public class TransactionController {
     }
 
     @PostMapping
-    public ResponseEntity<TransactionResponse> create(
-            @Valid @RequestBody CreateTransactionRequest request
-    ) {
-        var result = transactionService.create(request);
-        var transaction = result.transaction();
-        var location = URI.create("/api/v2/transactions/" + transaction.transactionId());
-        return result.created()
-                ? ResponseEntity.created(location).body(transaction)
-                : ResponseEntity.ok().location(location).body(transaction);
-    }
-
-    @GetMapping("/{transactionId}")
-    public TransactionResponse findById(@PathVariable UUID transactionId) {
-        return transactionService.findById(transactionId);
+    @ResponseStatus(HttpStatus.CREATED)
+    public TransactionResponse create(@Valid @RequestBody CreateTransactionRequest request) {
+        return transactionService.create(request);
     }
 
     @PostMapping("/normalize")
-    public CreateTransactionRequest normalize(
-            @Valid @RequestBody LegacyTransactionRequest request
-    ) {
+    public CreateTransactionRequest normalize(@Valid @RequestBody LegacyTransactionRequest request) {
         return transactionNormalizer.normalize(request);
     }
 }

@@ -7,9 +7,11 @@ CREATE TABLE transactions (
     status              VARCHAR(10) NOT NULL CHECK (status IN ('PENDING', 'SUCCESS', 'FAILED')),
     source_account      VARCHAR(64) NOT NULL,
     destination_account VARCHAR(64) NOT NULL,
-    channel             VARCHAR(24) NOT NULL,
+    channel             VARCHAR(24) NOT NULL CHECK (
+        channel IN ('UPI', 'CARD', 'NEFT', 'IMPS', 'RTGS', 'BANK_TRANSFER', 'OTHER')
+    ),
     created_at          TIMESTAMPTZ NOT NULL,
-    metadata            JSONB NOT NULL DEFAULT '{}'::jsonb,
+    metadata            JSONB NOT NULL DEFAULT '{}'::JSONB,
 
     CONSTRAINT uk_transactions_external_reference UNIQUE (external_reference)
 );

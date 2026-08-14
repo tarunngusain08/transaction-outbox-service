@@ -9,34 +9,21 @@ spring:
     open-in-view: false
     hibernate:
       ddl-auto: validate
-  jackson:
-    deserialization:
-      accept-float-as-int: false
-      fail-on-unknown-properties: true
-    mapper:
-      allow-coercion-of-scalars: false
   kafka:
     bootstrap-servers: ${KAFKA_BOOTSTRAP_SERVERS:localhost:9092}
     producer:
       key-serializer: org.apache.kafka.common.serialization.StringSerializer
       value-serializer: org.apache.kafka.common.serialization.StringSerializer
       acks: all
-      properties:
-        enable.idempotence: true
-        max.block.ms: ${KAFKA_MAX_BLOCK_MS:10000}
 
 management:
   endpoints:
     web:
       exposure:
-        include: health,info,outbox
+        include: health,info
 
 payments:
   outbox:
     topic: ${PAYMENTS_KAFKA_TOPIC:payments.transactions.created}
     poll-delay: ${OUTBOX_POLL_DELAY:1s}
-    batch-size: ${OUTBOX_BATCH_SIZE:50}
     publish-timeout: ${OUTBOX_PUBLISH_TIMEOUT:10s}
-    producer-max-block: ${KAFKA_MAX_BLOCK_MS:10000}ms
-    claim-lease: ${OUTBOX_CLAIM_LEASE:30s}
-    claim-safety-margin: ${OUTBOX_CLAIM_SAFETY_MARGIN:5s}
